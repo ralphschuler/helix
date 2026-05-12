@@ -5,9 +5,13 @@ module.exports = tseslint.config(
   {
     ignores: [
       'node_modules/**',
+      '**/node_modules/**',
       'dist/**',
+      '**/dist/**',
       'build/**',
+      '**/build/**',
       'coverage/**',
+      '**/coverage/**',
       '**/*.tsbuildinfo',
     ],
   },
