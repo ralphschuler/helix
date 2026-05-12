@@ -8,6 +8,12 @@ import {
   authorizeProjectPermission,
 } from './features/iam/authorization.js';
 import {
+  CustomRolePrivilegeEscalationError,
+  CustomRoleService,
+  type CustomRoleRecord,
+  type CustomRoleRepository,
+} from './features/iam/custom-roles.js';
+import {
   ProjectApiKeyService,
   type ProjectApiKeyRecord,
   type ProjectApiKeyRepository,
@@ -57,6 +63,43 @@ class RecordingAuditSink implements SecurityAuditSink {
 
   async record(event: SecurityAuditEvent): Promise<void> {
     this.events.push(event);
+  }
+}
+
+class RecordingCustomRoleRepository implements CustomRoleRepository {
+  readonly records = new Map<string, CustomRoleRecord>();
+
+  async insertCustomRole(record: CustomRoleRecord): Promise<void> {
+    this.records.set(record.id, record);
+  }
+
+  async findCustomRoleById(id: string): Promise<CustomRoleRecord | null> {
+    return this.records.get(id) ?? null;
+  }
+
+  async findCustomRoleBySlug(input: {
+    readonly tenantId: string;
+    readonly slug: string;
+  }): Promise<CustomRoleRecord | null> {
+    for (const record of this.records.values()) {
+      if (record.tenantId === input.tenantId && record.slug === input.slug) {
+        return record;
+      }
+    }
+
+    return null;
+  }
+
+  async listCustomRoles(input: {
+    readonly tenantId: string;
+  }): Promise<CustomRoleRecord[]> {
+    return [...this.records.values()].filter(
+      (record) => record.tenantId === input.tenantId,
+    );
+  }
+
+  async updateCustomRole(record: CustomRoleRecord): Promise<void> {
+    this.records.set(record.id, record);
   }
 }
 
@@ -195,6 +238,116 @@ describe('IAM permission authorization', () => {
       allowed: false,
       reason: 'wrong_project_scope',
     });
+  });
+});
+
+describe('custom role editor internals', () => {
+  it('creates, updates, disables, lists, and audits tenant-scoped permission roles', async () => {
+    const repository = new RecordingCustomRoleRepository();
+    const auditSink = new RecordingAuditSink();
+    const writerContext = authContext([
+      'iam:roles:read',
+      'iam:roles:write',
+      'agents:register',
+      'agents:claim',
+    ]);
+    const service = new CustomRoleService({
+      auditSink,
+      generateId: sequence([
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3c01',
+        '01890f42-98c4-7cc3-ba5e-0c567f1d3c02',
+        '01890f42-98c4-7cc3-8a5e-0c567f1d3c03',
+        '01890f42-98c4-7cc3-9a5e-0c567f1d3c04',
+      ]),
+      now: () => new Date('2026-05-12T18:10:00.000Z'),
+      repository,
+    });
+
+    const created = await service.createCustomRole(writerContext, {
+      tenantId,
+      slug: 'processor-operator',
+      name: 'Processor operator',
+      permissions: ['agents:register'],
+    });
+    const updated = await service.updateCustomRole(writerContext, {
+      tenantId,
+      id: created.id,
+      name: 'Processor operator v2',
+      permissions: ['agents:register', 'agents:claim'],
+    });
+    const listed = await service.listCustomRoles(authContext(['iam:roles:read']), {
+      tenantId,
+    });
+    const disabled = await service.disableCustomRole(writerContext, {
+      tenantId,
+      id: created.id,
+    });
+
+    expect(created).toMatchObject({
+      tenantId,
+      slug: 'processor-operator',
+      name: 'Processor operator',
+      permissions: ['agents:register'],
+      disabledAt: null,
+    });
+    expect(updated).toMatchObject({
+      id: created.id,
+      name: 'Processor operator v2',
+      permissions: ['agents:register', 'agents:claim'],
+      disabledAt: null,
+    });
+    expect(listed).toHaveLength(1);
+    expect(disabled).toMatchObject({
+      id: created.id,
+      disabledAt: new Date('2026-05-12T18:10:00.000Z'),
+    });
+    expect(auditSink.events.map((event) => event.action)).toEqual([
+      'iam.custom_role.created',
+      'iam.custom_role.updated',
+      'iam.custom_role.disabled',
+    ]);
+    expect(auditSink.events[0]).toMatchObject({
+      tenantId,
+      projectId: null,
+      actor: {
+        type: 'user',
+        id: 'stytch-member-1',
+      },
+      resourceType: 'custom_role',
+      resourceId: created.id,
+    });
+  });
+
+  it('rejects role writes without authorization or when granting permissions the actor lacks', async () => {
+    const repository = new RecordingCustomRoleRepository();
+    const auditSink = new RecordingAuditSink();
+    const service = new CustomRoleService({
+      auditSink,
+      generateId: sequence(['01890f42-98c4-7cc3-aa5e-0c567f1d3c11']),
+      now: () => new Date('2026-05-12T18:20:00.000Z'),
+      repository,
+    });
+
+    await expect(
+      service.createCustomRole(authContext(['agents:register']), {
+        tenantId,
+        slug: 'unauthorized',
+        name: 'Unauthorized',
+        permissions: ['agents:register'],
+      }),
+    ).rejects.toThrow(AuthorizationError);
+
+    await expect(
+      service.createCustomRole(authContext(['iam:roles:write']), {
+        tenantId,
+        slug: 'escalates',
+        name: 'Escalates',
+        permissions: ['agents:revoke'],
+      }),
+    ).rejects.toThrow(CustomRolePrivilegeEscalationError);
+
+    expect(repository.records).toHaveLength(0);
+    expect(auditSink.events).toHaveLength(0);
   });
 });
 

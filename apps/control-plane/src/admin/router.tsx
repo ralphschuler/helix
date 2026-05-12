@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   Outlet,
   createMemoryHistory,
@@ -7,6 +8,7 @@ import {
   useLoaderData,
 } from '@tanstack/react-router';
 import type { QueryClient } from '@tanstack/react-query';
+import { permissionCatalog } from '@helix/contracts';
 
 import {
   adminOverviewQueryOptions,
@@ -125,6 +127,7 @@ function AdminShell({
         <p>{activeSection.summary}</p>
         <p>{overview.rawDataPolicy}</p>
       </section>
+      {activeSection.id === 'users-rbac' ? <CustomRoleEditor /> : null}
       <section aria-labelledby="admin-disabled-controls">
         <h2 id="admin-disabled-controls">Disabled steering controls</h2>
         <p>
@@ -153,6 +156,174 @@ function AdminShell({
       </section>
     </main>
   );
+}
+
+function CustomRoleEditor(): React.ReactElement {
+  const [selectedRoleId, setSelectedRoleId] = useState('');
+  const [status, setStatus] = useState('Custom roles have not been loaded yet.');
+
+  async function handleCreateRole(event: React.FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const payload = readRoleFormPayload(event.currentTarget);
+
+    await submitRoleMutation('/admin/api/v1/iam/custom-roles', 'POST', payload, setStatus);
+  }
+
+  async function handleUpdateRole(form: HTMLFormElement | null): Promise<void> {
+    if (form === null || selectedRoleId.trim().length === 0) {
+      setStatus('Select a custom role before updating it.');
+      return;
+    }
+
+    const payload = readRoleFormPayload(form);
+
+    await submitRoleMutation(
+      `/admin/api/v1/iam/custom-roles/${encodeURIComponent(selectedRoleId.trim())}`,
+      'PATCH',
+      {
+        name: payload.name,
+        permissions: payload.permissions,
+      },
+      setStatus,
+    );
+  }
+
+  async function handleDisableRole(): Promise<void> {
+    if (selectedRoleId.trim().length === 0) {
+      setStatus('Select a custom role before disabling it.');
+      return;
+    }
+
+    await submitRoleMutation(
+      `/admin/api/v1/iam/custom-roles/${encodeURIComponent(selectedRoleId.trim())}`,
+      'DELETE',
+      undefined,
+      setStatus,
+    );
+  }
+
+  async function handleRefreshRoles(): Promise<void> {
+    const response = await fetch('/admin/api/v1/iam/custom-roles');
+
+    if (!response.ok) {
+      setStatus(`Custom roles failed to load: ${response.status}`);
+      return;
+    }
+
+    const body = (await response.json()) as { readonly customRoles?: readonly unknown[] };
+    setStatus(`Loaded ${body.customRoles?.length ?? 0} custom roles.`);
+  }
+
+  return (
+    <section aria-label="Custom role editor">
+      <h2>Custom role editor</h2>
+      <p>
+        Create tenant-scoped permission containers. Users can grant only permissions
+        they already hold; role changes are audited by the admin API.
+      </p>
+      <form aria-label="Create or update custom role" onSubmit={(event) => void handleCreateRole(event)}>
+        <label>
+          Role slug
+          <input name="slug" type="text" autoComplete="off" required />
+        </label>
+        <label>
+          Role name
+          <input name="name" type="text" autoComplete="off" required />
+        </label>
+        <fieldset>
+          <legend>Permissions</legend>
+          {permissionCatalog.map((permission) => (
+            <label key={permission}>
+              <input name="permissions" type="checkbox" value={permission} />
+              {permission}
+            </label>
+          ))}
+        </fieldset>
+        <button type="submit">Create role</button>
+        <label>
+          Selected role ID
+          <input
+            name="roleId"
+            type="text"
+            autoComplete="off"
+            value={selectedRoleId}
+            onChange={(event) => setSelectedRoleId(event.currentTarget.value)}
+          />
+        </label>
+        <button
+          type="button"
+          onClick={(event) => void handleUpdateRole(event.currentTarget.form)}
+        >
+          Update selected role
+        </button>
+        <button type="button" onClick={() => void handleDisableRole()}>
+          Disable selected role
+        </button>
+        <button type="button" onClick={() => void handleRefreshRoles()}>
+          Refresh roles
+        </button>
+      </form>
+      <p role="status">{status}</p>
+    </section>
+  );
+}
+
+interface RoleFormPayload {
+  readonly slug: string;
+  readonly name: string;
+  readonly permissions: readonly string[];
+}
+
+function readRoleFormPayload(form: HTMLFormElement): RoleFormPayload {
+  const formData = new FormData(form);
+
+  return {
+    slug: String(formData.get('slug') ?? ''),
+    name: String(formData.get('name') ?? ''),
+    permissions: formData.getAll('permissions').map(String),
+  };
+}
+
+async function submitRoleMutation(
+  url: string,
+  method: 'POST' | 'PATCH' | 'DELETE',
+  payload: unknown | undefined,
+  setStatus: (status: string) => void,
+): Promise<void> {
+  const requestInit: RequestInit = {
+    headers: {
+      'content-type': 'application/json',
+      'x-csrf-token': readCookieValue('helix_csrf') ?? '',
+    },
+    method,
+  };
+
+  if (payload !== undefined) {
+    requestInit.body = JSON.stringify(payload);
+  }
+
+  const response = await fetch(url, requestInit);
+
+  if (!response.ok) {
+    setStatus(`Custom role mutation failed: ${response.status}`);
+    return;
+  }
+
+  setStatus('Custom role mutation saved.');
+}
+
+function readCookieValue(name: string): string | null {
+  const cookieSource = typeof document === 'undefined' ? '' : document.cookie;
+
+  for (const part of cookieSource.split(';')) {
+    const [rawName, ...rawValue] = part.split('=');
+
+    if (rawName?.trim() === name) {
+      return rawValue.join('=').trim();
+    }
+  }
+
+  return null;
 }
 
 export type AdminRouter = ReturnType<typeof createAdminRouter>;

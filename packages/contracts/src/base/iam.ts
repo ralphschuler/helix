@@ -44,8 +44,36 @@ export const customRoleSchema = tenantScopeSchema
     slug: nonBlankStringSchema.max(128),
     name: nonBlankStringSchema.max(128),
     permissions: catalogPermissionSetSchema,
+    disabledAt: isoDateTimeSchema.nullable(),
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
+  })
+  .strict();
+
+export const createCustomRoleRequestSchema = z
+  .object({
+    slug: nonBlankStringSchema.max(128),
+    name: nonBlankStringSchema.max(128),
+    permissions: catalogPermissionSetSchema,
+  })
+  .strict();
+
+export const updateCustomRoleRequestSchema = z
+  .object({
+    name: nonBlankStringSchema.max(128),
+    permissions: catalogPermissionSetSchema,
+  })
+  .strict();
+
+export const customRoleResponseSchema = z
+  .object({
+    customRole: customRoleSchema,
+  })
+  .strict();
+
+export const customRoleListResponseSchema = z
+  .object({
+    customRoles: z.array(customRoleSchema),
   })
   .strict();
 
@@ -88,6 +116,10 @@ export const agentTokenRecordSchema = tenantProjectScopeSchema
 
 export type CatalogPermission = z.infer<typeof catalogPermissionSchema>;
 export type CustomRole = z.infer<typeof customRoleSchema>;
+export type CreateCustomRoleRequest = z.infer<typeof createCustomRoleRequestSchema>;
+export type UpdateCustomRoleRequest = z.infer<typeof updateCustomRoleRequestSchema>;
+export type CustomRoleResponse = z.infer<typeof customRoleResponseSchema>;
+export type CustomRoleListResponse = z.infer<typeof customRoleListResponseSchema>;
 export type ProjectApiKeyRecord = z.infer<typeof projectApiKeyRecordSchema>;
 export type AgentRegistrationCredentialRecord = z.infer<
   typeof agentRegistrationCredentialRecordSchema

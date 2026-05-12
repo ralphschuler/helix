@@ -6,6 +6,9 @@ import {
   authContextSchema,
   billingStatusSchema,
   catalogPermissionSchema,
+  createCustomRoleRequestSchema,
+  customRoleListResponseSchema,
+  customRoleResponseSchema,
   customRoleSchema,
   errorEnvelopeSchema,
   eventEnvelopeSchema,
@@ -15,6 +18,7 @@ import {
   tenantIdSchema,
   tenantProjectScopeSchema,
   tenantScopeSchema,
+  updateCustomRoleRequestSchema,
   permissionCatalog,
   projectApiKeyRecordSchema,
   stripeCustomerMappingSchema,
@@ -159,13 +163,29 @@ describe('IAM contracts', () => {
       slug: 'project-operator',
       name: 'Project operator',
       permissions: ['project_api_keys:create', 'agents:register'],
+      disabledAt: null,
       createdAt: '2026-05-12T16:00:00.000Z',
       updatedAt: '2026-05-12T16:00:00.000Z',
+    };
+    const createRequest = {
+      slug: 'project-operator',
+      name: 'Project operator',
+      permissions: ['project_api_keys:create', 'agents:register'],
+    };
+    const updateRequest = {
+      name: 'Project operator v2',
+      permissions: ['agents:register'],
     };
 
     expect(permissionCatalog).toContain('project_api_keys:create');
     expect(catalogPermissionSchema.parse('agents:claim')).toBe('agents:claim');
     expect(customRoleSchema.parse(customRole)).toEqual(customRole);
+    expect(createCustomRoleRequestSchema.parse(createRequest)).toEqual(createRequest);
+    expect(updateCustomRoleRequestSchema.parse(updateRequest)).toEqual(updateRequest);
+    expect(customRoleResponseSchema.parse({ customRole })).toEqual({ customRole });
+    expect(customRoleListResponseSchema.parse({ customRoles: [customRole] })).toEqual({
+      customRoles: [customRole],
+    });
     expect(() => customRoleSchema.parse({ ...customRole, permissions: ['owner'] })).toThrow();
     expect(() =>
       customRoleSchema.parse({
