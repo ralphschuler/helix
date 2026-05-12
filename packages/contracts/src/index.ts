@@ -4,4 +4,5 @@ export * from './base/errors.js';
 export * from './base/events.js';
 export * from './base/idempotency.js';
 export * from './base/ids.js';
+export * from './base/iam.js';
 export * from './base/scope.js';

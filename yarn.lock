@@ -236,7 +236,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@helix/contracts@workspace:packages/contracts":
+"@helix/contracts@workspace:*, @helix/contracts@workspace:packages/contracts":
   version: 0.0.0-use.local
   resolution: "@helix/contracts@workspace:packages/contracts"
   dependencies:
@@ -251,6 +251,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@helix/control-plane@workspace:apps/control-plane"
   dependencies:
+    "@helix/contracts": "workspace:*"
     "@hono/node-server": "npm:^2.0.2"
     "@tanstack/react-query": "npm:^5.100.10"
     "@tanstack/react-router": "npm:^1.169.2"

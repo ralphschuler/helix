@@ -1,8 +1,18 @@
 import type { ColumnType } from 'kysely';
 
 export type TimestampColumn = ColumnType<Date, Date | string | undefined, Date | string>;
+export type NullableTimestampColumn = ColumnType<
+  Date | null,
+  Date | string | null | undefined,
+  Date | string | null
+>;
 export type JsonObject = Record<string, unknown>;
 export type JsonColumn = ColumnType<JsonObject, JsonObject | string | undefined, JsonObject | string>;
+export type StringArrayJsonColumn = ColumnType<
+  readonly string[],
+  readonly string[] | string | undefined,
+  readonly string[] | string
+>;
 export type ProjectStatusColumn = ColumnType<
   'active' | 'archived',
   'active' | 'archived' | undefined,
@@ -57,6 +67,63 @@ export interface AuditEventsTable {
   occurred_at: TimestampColumn;
 }
 
+export interface CustomRolesTable {
+  id: string;
+  tenant_id: string;
+  slug: string;
+  name: string;
+  permissions_json: StringArrayJsonColumn;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
+export interface ProjectApiKeysTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  name: string;
+  key_prefix: string;
+  secret_hash_sha256: string;
+  permissions_json: StringArrayJsonColumn;
+  created_by_type: string;
+  created_by_id: string;
+  revoked_at: NullableTimestampColumn;
+  revoked_by_type: string | null;
+  revoked_by_id: string | null;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
+export interface AgentsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  name: string;
+  credential_prefix: string;
+  credential_hash_sha256: string;
+  permissions_json: StringArrayJsonColumn;
+  created_by_type: string;
+  created_by_id: string;
+  revoked_at: NullableTimestampColumn;
+  revoked_by_type: string | null;
+  revoked_by_id: string | null;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
+export interface AgentTokensTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  agent_id: string;
+  token_prefix: string;
+  token_hash_sha256: string;
+  permissions_json: StringArrayJsonColumn;
+  expires_at: TimestampColumn;
+  revoked_at: NullableTimestampColumn;
+  created_at: TimestampColumn;
+}
+
 export interface RetentionPoliciesTable {
   id: string;
   tenant_id: string;
@@ -74,4 +141,8 @@ export interface HelixDatabase {
   projects: ProjectsTable;
   audit_events: AuditEventsTable;
   retention_policies: RetentionPoliciesTable;
+  custom_roles: CustomRolesTable;
+  project_api_keys: ProjectApiKeysTable;
+  agents: AgentsTable;
+  agent_tokens: AgentTokensTable;
 }

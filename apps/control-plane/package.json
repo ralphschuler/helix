@@ -13,6 +13,7 @@
   },
   "type": "module",
   "dependencies": {
+    "@helix/contracts": "workspace:*",
     "@hono/node-server": "^2.0.2",
     "@tanstack/react-query": "^5.100.10",
     "@tanstack/react-router": "^1.169.2",
