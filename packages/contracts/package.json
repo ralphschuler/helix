@@ -4,8 +4,9 @@
   "private": true,
   "description": "Shared API, event, schema, and state-machine contracts shell.",
   "scripts": {
-    "check": "node -e \"console.log('check: @helix/contracts')\"",
-    "test": "node -e \"console.log('test: @helix/contracts')\"",
-    "lint": "node -e \"console.log('lint: @helix/contracts')\""
-  }
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --passWithNoTests --config ../../vitest.config.ts --dir .",
+    "lint": "eslint . --max-warnings 0"
+  },
+  "type": "module"
 }

@@ -26,6 +26,11 @@ Yarn workspace layout:
 ## Commands
 
 ```sh
-yarn install --frozen-lockfile
+yarn install --immutable
+yarn docs:check
+yarn tooling:check
+yarn check
+yarn test
+yarn lint
 yarn validate
 ```
