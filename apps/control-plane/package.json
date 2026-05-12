@@ -7,6 +7,7 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "vite --host 127.0.0.1",
     "build": "vite build && vite build --ssr src/entry-server.tsx --outDir dist/server --emptyOutDir false",
+    "db:migrate": "node src/db/migrate-cli.ts",
     "test": "vitest run --passWithNoTests --config ../../vitest.config.ts --dir .",
     "lint": "eslint . --max-warnings 0"
   },
@@ -16,12 +17,15 @@
     "@tanstack/react-query": "^5.100.10",
     "@tanstack/react-router": "^1.169.2",
     "hono": "^4.12.18",
+    "kysely": "^0.29.0",
+    "pg": "^8.20.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },
   "devDependencies": {
     "@types/jsdom": "^28.0.3",
     "@types/node": "22",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
