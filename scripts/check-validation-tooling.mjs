@@ -87,10 +87,44 @@ function requireCiCorepackSafety() {
   }
 }
 
+function requireRootScript(name, expectedFragment) {
+  const script = rootPackage.scripts?.[name];
+
+  if (!script) {
+    fail(`package.json missing ${name} script`);
+    return;
+  }
+
+  if (/node\s+-e|console\.log\(|^echo\b/.test(script)) {
+    fail(`package.json ${name} script is still a placeholder: ${script}`);
+  }
+
+  if (!script.includes(expectedFragment)) {
+    fail(`package.json ${name} script must include ${expectedFragment}: ${script}`);
+  }
+}
+
+function requireInfraSmokeTooling() {
+  const workflowPath = '.github/workflows/ci.yml';
+  requireRootScript('infra:smoke', 'scripts/infra-smoke.mjs');
+  requireFile('docker-compose.yml');
+  requireFile('.env.example');
+  requireFile('scripts/infra-smoke.mjs');
+
+  if (!existsSync(workflowPath)) return;
+  const workflow = readFileSync(workflowPath, 'utf8');
+  for (const snippet of ['docker compose up -d', 'yarn infra:smoke', 'docker compose down']) {
+    if (!workflow.includes(snippet)) {
+      fail(`${workflowPath} must include ${snippet} for service-backed smoke validation`);
+    }
+  }
+}
+
 requireFile('tsconfig.base.json');
 requireFile('eslint.config.js');
 requireFile('vitest.config.ts');
 requireCiCorepackSafety();
+requireInfraSmokeTooling();
 
 const packages = workspacePackagePaths();
 if (packages.length === 0) {

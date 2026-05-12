@@ -14,4 +14,8 @@ jobs:
           node-version-file: .nvmrc
       - run: corepack enable
       - run: yarn install --immutable
+      - run: docker compose up -d
+      - run: yarn infra:smoke
       - run: yarn validate
+      - if: always()
+        run: docker compose down

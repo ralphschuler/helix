@@ -23,12 +23,26 @@ Yarn workspace layout:
 - `packages/processor-sdk` — TypeScript processor SDK shell.
 - `packages/workflow-sdk` — TypeScript workflow SDK shell.
 
+## Local infrastructure
+
+Helix uses Postgres as authoritative state and Redpanda as the Kafka-compatible derived event bus for local/CI smoke checks.
+
+```sh
+cp .env.example .env
+docker compose up -d
+yarn infra:smoke
+docker compose down
+```
+
+Use `docker compose down -v` only when you intentionally want to delete local Postgres and Redpanda volumes.
+
 ## Commands
 
 ```sh
 yarn install --immutable
 yarn docs:check
 yarn tooling:check
+yarn infra:smoke
 yarn check
 yarn test
 yarn lint
