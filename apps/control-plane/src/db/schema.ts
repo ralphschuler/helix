@@ -74,6 +74,7 @@ export interface CustomRolesTable {
   slug: string;
   name: string;
   permissions_json: StringArrayJsonColumn;
+  disabled_at: NullableTimestampColumn;
   created_at: TimestampColumn;
   updated_at: TimestampColumn;
 }

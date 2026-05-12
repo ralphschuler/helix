@@ -97,4 +97,31 @@ describe('admin SSR route', () => {
       expect(html).toContain(section.heading);
     },
   );
+
+  it('renders custom role editor controls on the Users/RBAC admin route', async () => {
+    const response = await createApp().request('/admin/users-rbac', {
+      headers: {
+        [mockBrowserSessionHeader]: 'dev-session',
+      },
+    });
+    const html = await response.text();
+    const dom = new JSDOM(html);
+
+    try {
+      const document = dom.window.document;
+      const editor = document.querySelector('[aria-label="Custom role editor"]');
+
+      expect(response.status).toBe(200);
+      expect(editor?.textContent).toContain('Custom role editor');
+      expect(editor?.querySelector('input[name="slug"]')).not.toBeNull();
+      expect(editor?.querySelector('input[name="name"]')).not.toBeNull();
+      expect(editor?.querySelector('input[name="permissions"][value="iam:roles:read"]')).not.toBeNull();
+      expect(editor?.querySelector('input[name="permissions"][value="iam:roles:write"]')).not.toBeNull();
+      expect(editor?.textContent).toContain('Create role');
+      expect(editor?.textContent).toContain('Update selected role');
+      expect(editor?.textContent).toContain('Disable selected role');
+    } finally {
+      dom.window.close();
+    }
+  });
 });

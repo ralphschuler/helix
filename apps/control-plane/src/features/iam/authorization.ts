@@ -1,4 +1,4 @@
-import type { AuthContext, Permission, TenantProjectScope } from '@helix/contracts';
+import type { AuthContext, Permission, TenantProjectScope, TenantScope } from '@helix/contracts';
 
 export type AuthorizationFailureReason =
   | 'missing_permission'
@@ -19,17 +19,13 @@ export class AuthorizationError extends Error {
   }
 }
 
-export function authorizeProjectPermission(
+export function authorizeTenantPermission(
   authContext: AuthContext,
-  targetScope: TenantProjectScope,
+  targetScope: TenantScope,
   permission: Permission,
 ): AuthorizationResult {
   if (authContext.tenantId !== targetScope.tenantId) {
     return { allowed: false, reason: 'wrong_tenant_scope' };
-  }
-
-  if (authContext.projectId !== targetScope.projectId) {
-    return { allowed: false, reason: 'wrong_project_scope' };
   }
 
   if (!authContext.permissions.includes(permission)) {
@@ -37,6 +33,36 @@ export function authorizeProjectPermission(
   }
 
   return { allowed: true };
+}
+
+export function authorizeProjectPermission(
+  authContext: AuthContext,
+  targetScope: TenantProjectScope,
+  permission: Permission,
+): AuthorizationResult {
+  const tenantAuthorization = authorizeTenantPermission(authContext, targetScope, permission);
+
+  if (!tenantAuthorization.allowed) {
+    return tenantAuthorization;
+  }
+
+  if (authContext.projectId !== targetScope.projectId) {
+    return { allowed: false, reason: 'wrong_project_scope' };
+  }
+
+  return { allowed: true };
+}
+
+export function assertTenantPermission(
+  authContext: AuthContext,
+  targetScope: TenantScope,
+  permission: Permission,
+): void {
+  const authorization = authorizeTenantPermission(authContext, targetScope, permission);
+
+  if (!authorization.allowed) {
+    throw new AuthorizationError(authorization.reason);
+  }
 }
 
 export function assertProjectPermission(

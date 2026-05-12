@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Context, MiddlewareHandler } from 'hono';
+import type { AuthContext, Permission } from '@helix/contracts';
 
 import { renderAdminDocumentStream } from '../entry-server.js';
 import { UnmappedStripeCustomerError } from '../features/billing/billing-service.js';
@@ -14,6 +15,17 @@ import {
   type BrowserAuthContext,
   type BrowserAuthProvider,
 } from '../features/auth/browser-auth.js';
+import { AuthorizationError } from '../features/iam/authorization.js';
+import {
+  CustomRoleNotFoundError,
+  CustomRolePrivilegeEscalationError,
+  CustomRoleService,
+  CustomRoleValidationError,
+  DuplicateCustomRoleSlugError,
+  InMemoryCustomRoleRepository,
+  type CustomRoleRecord,
+} from '../features/iam/custom-roles.js';
+import type { SecurityAuditSink } from '../features/iam/security-audit.js';
 
 type AppEnvironment = {
   Variables: {
@@ -25,6 +37,7 @@ export interface CreateAppOptions {
   readonly browserAuthProvider?: BrowserAuthProvider;
   readonly allowedBrowserOrigins?: readonly string[];
   readonly stripeBillingWebhookHandler?: BillingWebhookHandler;
+  readonly customRoleService?: CustomRoleService;
 }
 
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -38,6 +51,12 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     allowedOrigins: options.allowedBrowserOrigins ?? [],
     browserAuthProvider,
   });
+  const customRoleService =
+    options.customRoleService ??
+    new CustomRoleService({
+      auditSink: new NoopSecurityAuditSink(),
+      repository: new InMemoryCustomRoleRepository(),
+    });
 
   app.get('/health', (context) =>
     context.json({
@@ -82,6 +101,85 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
   app.get('/admin/api/v1/session', (context) =>
     context.json(toSessionResponse(context.get('browserAuth'))),
   );
+
+  app.get('/admin/api/v1/iam/custom-roles', async (context) => {
+    try {
+      const customRoles = await customRoleService.listCustomRoles(
+        toAuthContext(context.get('browserAuth')),
+        { tenantId: context.get('browserAuth').tenantId },
+      );
+
+      return context.json({
+        customRoles: customRoles.map(toCustomRoleResponse),
+      });
+    } catch (error) {
+      return handleCustomRoleError(context, error);
+    }
+  });
+
+  app.post('/admin/api/v1/iam/custom-roles', async (context) => {
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    try {
+      const customRole = await customRoleService.createCustomRole(
+        toAuthContext(context.get('browserAuth')),
+        {
+          tenantId: context.get('browserAuth').tenantId,
+          slug: getStringField(body.value, 'slug'),
+          name: getStringField(body.value, 'name'),
+          permissions: getStringArrayField(body.value, 'permissions'),
+        },
+      );
+
+      return context.json({ customRole: toCustomRoleResponse(customRole) }, 201);
+    } catch (error) {
+      return handleCustomRoleError(context, error);
+    }
+  });
+
+  app.patch('/admin/api/v1/iam/custom-roles/:roleId', async (context) => {
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    try {
+      const customRole = await customRoleService.updateCustomRole(
+        toAuthContext(context.get('browserAuth')),
+        {
+          tenantId: context.get('browserAuth').tenantId,
+          id: context.req.param('roleId'),
+          name: getStringField(body.value, 'name'),
+          permissions: getStringArrayField(body.value, 'permissions'),
+        },
+      );
+
+      return context.json({ customRole: toCustomRoleResponse(customRole) });
+    } catch (error) {
+      return handleCustomRoleError(context, error);
+    }
+  });
+
+  app.delete('/admin/api/v1/iam/custom-roles/:roleId', async (context) => {
+    try {
+      const customRole = await customRoleService.disableCustomRole(
+        toAuthContext(context.get('browserAuth')),
+        {
+          tenantId: context.get('browserAuth').tenantId,
+          id: context.req.param('roleId'),
+        },
+      );
+
+      return context.json({ customRole: toCustomRoleResponse(customRole) });
+    } catch (error) {
+      return handleCustomRoleError(context, error);
+    }
+  });
 
   app.get('/admin', renderAdminRoute);
   app.get('/admin/*', renderAdminRoute);
@@ -236,4 +334,100 @@ function applyCorsHeaders(
 
   context.res.headers.set('access-control-allow-origin', originDecision.origin);
   context.res.headers.append('vary', 'Origin');
+}
+
+class NoopSecurityAuditSink implements SecurityAuditSink {
+  async record(): Promise<void> {
+    return;
+  }
+}
+
+function toAuthContext(browserAuth: BrowserAuthContext): AuthContext {
+  return {
+    tenantId: browserAuth.tenantId,
+    projectId: browserAuth.projectId,
+    principal: browserAuth.principal,
+    permissions: [...browserAuth.permissions] as Permission[],
+  };
+}
+
+function toCustomRoleResponse(record: CustomRoleRecord) {
+  return {
+    id: record.id,
+    tenantId: record.tenantId,
+    slug: record.slug,
+    name: record.name,
+    permissions: [...record.permissions],
+    disabledAt: record.disabledAt?.toISOString() ?? null,
+    createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString(),
+  };
+}
+
+async function readJsonObject(
+  context: Context<AppEnvironment>,
+): Promise<
+  | { readonly ok: true; readonly value: Record<string, unknown> }
+  | { readonly ok: false; readonly error: string }
+> {
+  let body: unknown;
+
+  try {
+    body = await context.req.json();
+  } catch {
+    return { ok: false, error: 'invalid_json' };
+  }
+
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, error: 'invalid_request_body' };
+  }
+
+  return { ok: true, value: body as Record<string, unknown> };
+}
+
+function getStringField(body: Record<string, unknown>, field: string): string {
+  const value = body[field];
+
+  if (typeof value !== 'string') {
+    throw new CustomRoleValidationError(`${field} must be a string.`);
+  }
+
+  return value;
+}
+
+function getStringArrayField(body: Record<string, unknown>, field: string): readonly string[] {
+  const value = body[field];
+
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new CustomRoleValidationError(`${field} must be a string array.`);
+  }
+
+  return value as string[];
+}
+
+function handleCustomRoleError(
+  context: Context<AppEnvironment>,
+  error: unknown,
+): Response {
+  if (error instanceof AuthorizationError) {
+    return context.json({ error: error.reason }, 403);
+  }
+
+  if (error instanceof CustomRolePrivilegeEscalationError) {
+    return context.json({ error: 'permission_privilege_escalation' }, 403);
+  }
+
+  if (error instanceof CustomRoleValidationError) {
+    return context.json({ error: 'invalid_custom_role', message: error.message }, 400);
+  }
+
+  if (error instanceof DuplicateCustomRoleSlugError) {
+    return context.json({ error: 'custom_role_slug_exists' }, 409);
+  }
+
+  if (error instanceof CustomRoleNotFoundError) {
+    return context.json({ error: 'custom_role_not_found' }, 404);
+  }
+
+  throw error;
 }

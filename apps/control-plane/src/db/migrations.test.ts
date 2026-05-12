@@ -87,6 +87,23 @@ describe('database migration runner', () => {
     await expect(readFile(path.join(getDefaultMigrationsDirectory(), '0001_base_tenant_project_schema.sql'), 'utf8')).resolves.toBe(baseMigration?.sql);
   });
 
+  it('ships custom role disable migration for safe soft-disable semantics', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const customRoleDisableMigration = migrations.find(
+      (migration) => migration.id === '0004_custom_role_disable',
+    );
+
+    expect(customRoleDisableMigration).toBeDefined();
+    expect(customRoleDisableMigration?.sql).toContain(
+      'alter table custom_roles add column if not exists disabled_at timestamptz',
+    );
+    expect(customRoleDisableMigration?.sql).toContain('custom_roles_active_tenant_slug_idx');
+
+    await expect(
+      readFile(path.join(getDefaultMigrationsDirectory(), '0004_custom_role_disable.sql'), 'utf8'),
+    ).resolves.toBe(customRoleDisableMigration?.sql);
+  });
+
   it('ships billing schema with org-scoped Stripe mapping, webhook idempotency, and usage ledger rows', async () => {
     const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
     const billingMigration = migrations.find((migration) => migration.id === '0003_billing_schema');
