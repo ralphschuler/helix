@@ -4,6 +4,7 @@ import {
   agentRegistrationCredentialRecordSchema,
   agentTokenRecordSchema,
   authContextSchema,
+  billingStatusSchema,
   catalogPermissionSchema,
   customRoleSchema,
   errorEnvelopeSchema,
@@ -16,11 +17,15 @@ import {
   tenantScopeSchema,
   permissionCatalog,
   projectApiKeyRecordSchema,
+  stripeCustomerMappingSchema,
+  stripeWebhookEventRecordSchema,
+  usageLedgerRecordSchema,
   uuidV7Schema,
 } from '@helix/contracts';
 
 const validTenantId = '01890f42-98c4-7cc3-8a5e-0c567f1d3a77';
 const validProjectId = '01890f42-98c4-7cc3-9a5e-0c567f1d3a78';
+const validOrganizationId = '01890f42-98c4-7cc3-aa5e-0c567f1d3a85';
 
 describe('base identifier contracts', () => {
   it('accepts UUIDv7-shaped resource identifiers and rejects other UUID versions', () => {
@@ -220,6 +225,56 @@ describe('IAM contracts', () => {
     ).toThrow();
     expect(() =>
       agentTokenRecordSchema.parse({ ...agentTokenRecord, expiresAt: 'not-a-date' }),
+    ).toThrow();
+  });
+});
+
+describe('billing contracts', () => {
+  it('models Stripe customer projection, webhook idempotency, and tenant/org scoped usage ledger rows', () => {
+    const stripeCustomerMapping = {
+      id: '01890f42-98c4-7cc3-ba5e-0c567f1d3a86',
+      tenantId: validTenantId,
+      organizationId: validOrganizationId,
+      stripeCustomerId: 'cus_test_123',
+      billingStatus: 'active',
+      currentSubscriptionId: 'sub_test_123',
+      createdAt: '2026-05-12T17:00:00.000Z',
+      updatedAt: '2026-05-12T17:01:00.000Z',
+    };
+    const usageLedgerRecord = {
+      id: '01890f42-98c4-7cc3-8a5e-0c567f1d3a87',
+      tenantId: validTenantId,
+      organizationId: validOrganizationId,
+      projectId: validProjectId,
+      usageType: 'job.execution',
+      quantity: 3,
+      idempotencyKey: 'usage:job-123',
+      metadata: { jobId: 'job-123' },
+      recordedAt: '2026-05-12T17:02:00.000Z',
+    };
+    const webhookEventRecord = {
+      stripeEventId: 'evt_test_123',
+      tenantId: validTenantId,
+      organizationId: validOrganizationId,
+      stripeCustomerId: 'cus_test_123',
+      eventType: 'customer.subscription.updated',
+      processedAt: '2026-05-12T17:03:00.000Z',
+    };
+
+    expect(billingStatusSchema.parse('past_due')).toBe('past_due');
+    expect(stripeCustomerMappingSchema.parse(stripeCustomerMapping)).toEqual(
+      stripeCustomerMapping,
+    );
+    expect(usageLedgerRecordSchema.parse(usageLedgerRecord)).toEqual(usageLedgerRecord);
+    expect(stripeWebhookEventRecordSchema.parse(webhookEventRecord)).toEqual(
+      webhookEventRecord,
+    );
+    expect(() => usageLedgerRecordSchema.parse({ ...usageLedgerRecord, quantity: 0 })).toThrow();
+    expect(() =>
+      stripeCustomerMappingSchema.parse({
+        ...stripeCustomerMapping,
+        stripeCustomerId: '',
+      }),
     ).toThrow();
   });
 });
