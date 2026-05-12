@@ -4,6 +4,12 @@ Helix is a SaaS-first durable distributed execution platform: brokered execution
 
 See [PRD.md](./PRD.md) for product requirements and phased delivery.
 
+## Architecture docs
+
+- [Architecture Decision Records](./docs/adr/README.md)
+- [Domain glossary](./docs/glossary.md)
+- [Architecture checklist](./docs/architecture-checklist.md)
+
 ## Workspace
 
 Yarn workspace layout:
