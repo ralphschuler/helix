@@ -92,23 +92,43 @@ The result is not a queue-only product. It is a distributed execution fabric and
 - Producer SDK responsibilities: create jobs, start workflows, wait for completion, stream events, provide idempotency options, and expose typed metadata/tags/labels.
 - Processor SDK responsibilities: register handlers, claim/receive jobs, report progress, renew leases, complete/fail attempts, access scoped artifacts, and provide idempotency helpers.
 - Workflow SDK responsibilities: define static DAGs, validate dependencies locally, declare waits/signals/timers/approvals, publish versions, and start runs.
-- Control plane module: responsible for tenants, orgs, projects, auth, RBAC, agent identities, API tokens, quotas, billing-ready usage records, retention policies, and audit events.
-- Operations plane module: responsible for dashboard views, workflow graph visualization, live event console, processor health, DLQ management, retry/replay controls, timeline, metrics, and audit exploration.
-- Observability: OpenTelemetry-style traces, metrics, structured events, processor history, lease history, step durations, retry timeline, queue depth, claim latency, and stream replay should be first-class platform outputs.
+- Control plane module: responsible for tenants, orgs, projects, auth, permission-based IAM, agent identities, API tokens, quotas, billing-ready usage records, retention policies, and audit events.
+- Control plane application topology: the first web/API deployable is a single full-stack `apps/control-plane` application. It uses Hono on Node 22 for REST/JSON APIs, internal admin APIs, webhooks, health checks, and React server rendering. The React control/admin experience lives under `/admin` in this app.
+- Operations console topology: do not maintain a separate active `apps/ops-console` application for v1. The standalone operations console may be reintroduced later only through an ADR-backed extraction from `apps/control-plane`.
+- Runtime topology: keep long-running execution roles separate from the web server. `apps/control-plane` owns web/API/SSR, while `services/broker`, `services/scheduler`, and a future outbox publisher run as independent Node processes that share Postgres and shared contracts.
+- Frontend runtime: use React with streaming SSR through Vite client and SSR entries. TanStack Router owns route matching/loaders, TanStack Query owns server data prefetch/dehydrate/rehydrate per feature route, and Zustand is limited to local UI state rather than durable server truth.
+- UI system: use Tailwind CSS plus local Radix/shadcn-style components. Shared UI primitives live in the control-plane app; feature-specific UI remains with the owning feature.
+- Feature organization: implement vertical feature folders per deployable, such as `apps/control-plane/src/features/<feature>/{api,server,db,ui,tests}`. Shared API/event schemas live by feature under `packages/contracts`.
+- Web/API contract style: expose versioned REST/JSON APIs and SSE streams. Version public machine APIs under `/api/v1`; version admin browser APIs as well. Contracts are framework-agnostic Zod schemas in `packages/contracts`, with Hono-specific route glue in the app and generated OpenAPI/JSON Schema artifacts for review.
+- Authentication model: use Stytch B2B for browser user authentication. Map Stytch Organizations to Helix tenant/org records and Stytch Members to Helix user memberships. Helix owns projects, permissions, API tokens, agent identities, and resource authorization.
+- Browser auth/session handling: Stytch sessions are the primary browser identity. Hono validates browser sessions server-side before protected SSR/API access, then loads Helix tenant/project/permission context from Postgres.
+- Non-browser auth: SDK and agent access must not depend on browser sessions. Use hashed project API keys for producer/workflow SDK access, project-scoped registration credentials exchanged for short-lived agent tokens, and separate internal service tokens later.
+- Onboarding model: support self-serve org creation through Stytch B2B. The first accepted member of a new org becomes the initial owner-equivalent principal. Stripe customers are created lazily when billing setup begins.
+- Platform admin bootstrap: bootstrap the first platform super-admins from a deployment-time allowlist of verified Stytch member emails or IDs, then manage platform permissions in Postgres with audit events.
+- Permission model: use permission-only custom roles as the long-term IAM model. The first scaffold must include schema/contracts for custom roles and permission checks; the full custom role editor is the next implementation slice after the stack scaffold is validated.
+- Browser/API security defaults: use deny-by-default CORS, CSRF protection for browser-authenticated mutations, HttpOnly/SameSite browser cookies where cookies are used, bearer/token auth for machine APIs, and a separate raw-body Stripe webhook route with signature verification.
+- Billing model: use Stripe for hybrid SaaS billing. Each Helix org maps to a Stripe customer, subscription tiers provide base entitlements, durable usage ledger records support metered billing, and Stripe webhooks are idempotent and authoritative for billing status projection.
+- Database access: use Kysely with `pg` and repo-owned plain SQL migrations. Migrations are tracked in Postgres with a `_schema_migrations` table and must remain repeatable from a clean database.
+- Identifier model: use UUIDv7 for primary durable resource identifiers. Event stream cursors are opaque to clients and may internally encode stream id, sequence, and event id.
+- Event contract model: define versioned Zod event schemas in `packages/contracts` and generate reviewable schema artifacts. Defer an external Kafka schema registry until production event-bus hardening.
+- Local infrastructure: use Docker Compose with Postgres and Redpanda as the Kafka-compatible local and CI event-bus target. Redpanda supports local parity, but Postgres/outbox remains authoritative.
+- Operations plane module: the `/admin` section is responsible for dashboard views, workflow graph visualization, live event console, processor health, DLQ management, retry/replay controls, timeline, metrics, billing, IAM, audit exploration, and steering controls.
+- Admin safety posture: the first admin scaffold should render the full control map, including Overview, Tenants, Projects, Users/RBAC, Billing, Processors, Jobs, Workflows, Schedules, Replay/DLQ, Audit, and Settings. Dangerous controls such as replay, DLQ mutation, processor steering, and quota overrides stay disabled or placeholder-only until audited state machines and permissions exist.
+- Observability: use OpenTelemetry APIs plus structured JSON logs from day one. Product-visible event, audit, processor, lease, timeline, and stream history remain persisted domain data, not raw log-derived UI state.
 - Retention: tenants configure retention policies for events, checkpoints, logs, artifacts, audit records, and stream replay where safe. Defaults must protect cost and product usability.
 - Scheduling semantics: delayed, cron, interval, recurring job, and recurring workflow schedules must be idempotent. Misfire behavior must be explicit.
 - Priority model: formal levels such as critical, high, normal, low, and background. Broker policy should support weighted queues, quotas, and starvation prevention.
 - Concurrency model: jobs may specify concurrency group keys with limits, such as per-user render limits, per-project deployment limits, or global GPU limits.
 - Rate limit model: jobs/workflows may reference tenant, project, processor, external API, or capability buckets with fixed or sliding interval policies.
 - Metadata model: jobs, workflows, processors, events, schedules, artifacts, and runs support metadata, tags, and labels for filtering, routing, observability, and billing/usage analytics.
-- API contracts to define before implementation include workflow CRUD/versioning, run start/status/list, job create/status/replay, processor registration/claim/heartbeat/complete/fail, signal delivery, schedule CRUD, stream endpoints, storage refs, and replay endpoints.
+- API contracts to define before implementation include workflow CRUD/versioning, run start/status/list, job create/status/replay, processor registration/claim/heartbeat/complete/fail, signal delivery, schedule CRUD, stream endpoints, storage refs, replay endpoints, admin/IAM endpoints, billing endpoints, and webhook endpoints.
 - Prototype-derived API decision examples:
-  - `GET /workflows/:id/stream` streams workflow events with cursor resume.
-  - `GET /jobs/stream?workflowId=...` streams filtered job events.
-  - `POST /signals/:workflowId` delivers an external signal to a waiting workflow.
-  - `POST /jobs/:id/replay` and `POST /workflows/:id/replay` request redrive under explicit replay modes.
-- Deep modules with small stable interfaces should be prioritized for broker policy, workflow graph validation, state transition engine, outbox/event publishing, signal delivery, scheduler enqueueing, storage refs, stream cursors, and agent authentication. These modules should hide complex implementation details behind contract-tested interfaces.
-- Avoid framework-specific commitments in this PRD. Architecture decisions are stack-neutral except for approved platform choices: Postgres, Kafka, TypeScript-first SDKs, outbound agents, and SaaS-first tenancy.
+  - `GET /api/v1/workflows/:id/stream` streams workflow events with cursor resume.
+  - `GET /api/v1/jobs/stream?workflowId=...` streams filtered job events.
+  - `POST /api/v1/signals/:workflowId` delivers an external signal to a waiting workflow.
+  - `POST /api/v1/jobs/:id/replay` and `POST /api/v1/workflows/:id/replay` request redrive under explicit replay modes.
+- Deep modules with small stable interfaces should be prioritized for broker policy, workflow graph validation, state transition engine, outbox/event publishing, signal delivery, scheduler enqueueing, storage refs, stream cursors, agent authentication, billing webhook handling, IAM permission checks, and SSR route data loading. These modules should hide complex implementation details behind contract-tested interfaces.
+- This PRD now includes approved stack decisions for the first implementation path. Cloud-specific deployment, infrastructure-as-code, and enterprise dedicated-stack choices remain out of scope until separate ADRs approve them.
 
 ## Testing Decisions
 
@@ -133,60 +153,86 @@ The result is not a queue-only product. It is a distributed execution fabric and
 - Chaos/failure tests must include agent crash, broker restart, Postgres transaction rollback, Kafka outage, duplicate Kafka messages, network timeout during completion, stream disconnect, scheduler duplicate execution, and storage provider denial.
 - Performance and fairness tests must measure queue depth, claim latency, event publish lag, stream resume latency, processor heartbeat volume, tenant quota behavior, weighted priority behavior, and concurrency group enforcement.
 - Security tests must include authorization fuzzing, token expiry/revocation, signed URL constraints, tenant isolation, audit coverage, BYO storage confused-deputy scenarios, and sensitive data leakage in events/logs.
-- Since the repository is currently empty and non-git, no prior tests or codebase patterns exist yet. The first implementation phase should establish test structure and commands before feature code.
+- At the time of this PRD update, the repository is a Yarn workspace scaffold with placeholder workspace checks. The first implementation phase must replace fake-green `check`, `test`, and `lint` scripts with real TypeScript, test, and lint validation before feature code depends on them.
+- Test stack decision: use Vitest for unit, contract, server, and API tests; Testing Library for React component behavior; and Playwright for SSR/admin/auth smoke and end-to-end flows.
+- CI must run real typecheck, lint, unit/contract tests, and service-backed smoke tests with Postgres and Redpanda. If a Redpanda-backed check is too flaky for the first PR, it must be explicitly marked as a temporary risk and kept in local validation.
+- Stytch tests must use an auth provider interface with a real Stytch adapter and a deterministic local/dev mock adapter. CI must not require real Stytch secrets.
+- Stripe tests must use a Stripe adapter, local webhook signature fixtures, and mocked Stripe clients. CI must not make live Stripe network calls or depend on real Stripe credentials.
+- Streaming SSR tests must cover route matching, loader prefetch, React Query dehydration/rehydration, protected admin route handling, and hydration mismatch prevention.
+- Permission/IAM tests must prove permission-based authorization, custom role schema behavior, tenant/project scoping, platform-admin bootstrap constraints, and privilege-escalation rejection.
 
 ## Feature Phases
 
-### Phase 1: Product Specification and ADR Set
+### Phase 1: Product Specification, ADR Set, and Thin Stack Scaffold
 
-Goal: Freeze platform invariants before implementation.
+Goal: Freeze platform invariants, record approved stack choices, and replace placeholder scaffolding with a minimal executable foundation before product feature work.
 
 Major modules/areas:
-- Architecture decision records.
+- Architecture decision records for stack, topology, auth, billing, database, events, SSR, admin, and observability.
 - Glossary and domain model.
 - API/event contract drafts.
 - Test strategy and acceptance checklist.
+- Real TypeScript/ESM, lint, test, and CI commands.
+- Single full-stack `apps/control-plane` Hono + React streaming SSR skeleton.
+- Docker Compose for Postgres and Redpanda.
+- Removal of the separate active `apps/ops-console` workspace.
 
 Acceptance criteria:
-- Decisions documented for execution semantics, consistency, tenancy, storage, agent trust, replay, scheduling, retention, and observability.
-- Glossary defines tenant, project, workflow, workflow version, run, step, job, attempt, lease, processor, signal, event, schedule, replay, checkpoint, DLQ, and artifact.
+- Decisions documented for execution semantics, consistency, tenancy, storage, agent trust, replay, scheduling, retention, observability, Hono/React SSR, Stytch B2B, Stripe, Kysely/Postgres, Redpanda, testing, and admin topology.
+- Glossary defines tenant, project, workflow, workflow version, run, step, job, attempt, lease, processor, signal, event, schedule, replay, checkpoint, DLQ, artifact, usage event, role, permission, API key, and agent token.
 - API and event contracts distinguish authoritative state from emitted events.
+- `apps/control-plane` can serve a health route and render a protected-ready `/admin` shell through the approved SSR pipeline.
+- Placeholder workspace `check`, `test`, and `lint` scripts are replaced with real validation.
 - Stop conditions are documented for unsafe semantic conflicts.
 
 Validation commands/checks:
 - Documentation review confirms every approved decision in this PRD has an ADR or tracked follow-up.
-- Architecture checklist verifies Kafka is not described as source of truth.
+- Architecture checklist verifies Kafka/Redpanda is not described as source of truth.
 - Domain glossary review verifies terms are used consistently.
+- `yarn validate` runs real checks rather than echo-only placeholders.
+- Docker Compose can start Postgres and Redpanda for local smoke tests.
 
 Rollback/stop point:
-- Stop before code if execution, replay, isolation, or idempotency semantics conflict.
+- Stop before product feature code if execution, replay, isolation, idempotency, auth, billing, or stack topology semantics conflict.
 
-### Phase 2: Tenant, Security, and Control Plane Foundation
+### Phase 2: Tenant, Security, Billing, and Admin Control Plane Foundation
 
-Goal: Establish SaaS-safe tenant/project boundaries and agent identity before execution features depend on them.
+Goal: Establish SaaS-safe tenant/project boundaries, Stytch-backed browser auth, machine auth separation, permission-only IAM, billing foundation, and safe admin surface before execution features depend on them.
 
 Major modules/areas:
-- Tenant/org/project model.
-- RBAC and API token model.
-- Agent identity and registration.
+- Tenant/org/project model mapped from Stytch B2B organizations and members.
+- Permission-only IAM model with custom role schema/contracts.
+- Project API key model.
+- Agent identity, registration, and short-lived token model.
+- Stytch provider adapter plus deterministic dev/test mock.
+- Stripe billing adapter, org/customer mapping, webhook handling, and durable usage ledger.
 - Audit log model.
 - Retention policy model.
+- `/admin` shell with full navigation map and disabled dangerous controls.
 
 Acceptance criteria:
 - Every durable resource has tenant scope; project scope exists where appropriate.
-- API users, API tokens, and agents cannot access other tenants or projects.
-- Agents receive scoped short-lived tokens.
-- Agent revocation prevents new claims.
+- Browser users, API tokens, and agents cannot access other tenants or projects.
+- Browser session validation is server-side for protected SSR/admin/API routes.
+- Browser-authenticated mutations use CSRF protection and strict CORS defaults.
+- Project API keys and agent tokens are separate from Stytch browser sessions.
+- Agents receive scoped short-lived tokens, and revocation prevents new claims.
+- Permission checks use explicit permissions rather than hard-coded role names.
+- Custom role schema/contracts are present, with full editor planned as the next slice after the scaffold.
+- Stripe webhooks are signature-verified, idempotent, and audited.
 - Enterprise mTLS path is documented even if not implemented in the first slice.
-- Audit events exist for security-sensitive user, token, agent, replay, and storage actions.
+- Audit events exist for security-sensitive user, token, agent, billing, replay, role, permission, and storage actions.
+- Dangerous admin steering controls remain disabled until audited runtime state machines exist.
 
 Validation commands/checks:
 - Run tenant isolation test suite once test infrastructure exists.
-- Run authz contract tests for all public resource APIs.
+- Run authz contract tests for all browser, public API, admin API, and agent resource paths.
+- Run Stytch mock session tests without real secrets.
+- Run Stripe webhook fixture/idempotency tests without live Stripe calls.
 - Manually review resource schema for tenant/project scope coverage.
 
 Rollback/stop point:
-- Do not launch SaaS execution features if cross-tenant access tests fail.
+- Do not launch SaaS execution features if cross-tenant access, privilege-escalation, webhook idempotency, or browser/machine auth separation tests fail.
 
 ### Phase 3: Durable State and Event Consistency Foundation
 
@@ -518,7 +564,7 @@ Rollback/stop point:
 - Fully dynamic runtime-created workflow graphs in v1.
 - Code-first deterministic durable functions in v1.
 - Mandatory mTLS for all tenants; mTLS is an enterprise option.
-- Choosing a specific web framework, frontend framework, ORM, test runner, deployment platform, or infrastructure-as-code tool in this PRD.
+- Choosing a cloud provider, production deployment platform, infrastructure-as-code stack, or enterprise dedicated-stack topology before separate ADR approval.
 - Storing large payloads or artifacts directly in Kafka.
 - Treating Kafka as the authoritative state store.
 - Launching SaaS execution features without tenant isolation, idempotency, and lease safety tests.
@@ -527,10 +573,10 @@ Rollback/stop point:
 
 ## Further Notes
 
-- Current repository context: `/home/ralph/Github/helix` is empty and not a git repository at PRD creation time. No `CONTEXT.md`, `docs/adr/`, or existing markdown docs were found.
-- This PRD intentionally avoids volatile file paths because project structure does not exist yet.
-- First follow-up should create project/repository scaffolding and documentation locations before feature implementation.
-- Recommended early ADRs: execution semantics, state/Kafka consistency, SaaS tenancy/isolation, agent trust, workflow graph model, idempotency, replay/redrive, storage/BYO, retention, and scheduling.
+- Current repository context: `/home/ralph/Github/helix` is a public GitHub-backed Yarn workspace scaffold with `apps/control-plane`, `apps/ops-console`, `services/broker`, `services/scheduler`, `packages/contracts`, and TypeScript SDK package placeholders. Workspace validation currently exists but is placeholder-level and must be hardened before feature implementation.
+- The approved first topology is a single full-stack `apps/control-plane`; remove the active `apps/ops-console` workspace until an ADR justifies extracting it again.
+- First follow-up should create ADRs, real validation tooling, local infrastructure, and the Hono/React SSR control-plane skeleton before broker/workflow feature implementation.
+- Recommended early ADRs: web/runtime topology, streaming SSR/data loading, auth/session/IAM, billing/Stripe, database/migrations, state/Kafka consistency, SaaS tenancy/isolation, agent trust, workflow graph model, idempotency, replay/redrive, storage/BYO, retention, scheduling, admin steering safety, and observability.
 - Highest-risk areas: cross-tenant isolation, duplicate delivery, external side effects, rogue/stolen agents, replay safety, Kafka/Postgres consistency, BYO storage credentials, and cost control for retained events/artifacts.
 - Product terminology should consistently describe the system as a durable distributed execution platform, execution fabric, workflow runtime, and worker control plane.
 - Operational SLOs should be defined before beta: claim latency, workflow start latency, stream resume latency, event publish lag, heartbeat tolerance, scheduler drift, replay latency, RPO/RTO, and maximum acceptable duplicate execution windows.
