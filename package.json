@@ -13,7 +13,7 @@
     "check": "yarn workspaces run check",
     "test": "yarn workspaces run test",
     "lint": "yarn workspaces run lint",
-    "docs:check": "test -f README.md && test -f PRD.md",
+    "docs:check": "node scripts/check-docs.mjs",
     "validate": "yarn run docs:check && yarn run check && yarn run test && yarn run lint"
   },
   "engines": {
