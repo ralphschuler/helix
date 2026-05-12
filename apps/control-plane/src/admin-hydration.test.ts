@@ -3,6 +3,7 @@ import type { Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { hydrateAdminShell } from './entry-client.js';
+import { mockBrowserSessionHeader } from './features/auth/browser-auth.js';
 import { createApp } from './server/app.js';
 
 describe('admin client hydration', () => {
@@ -12,7 +13,11 @@ describe('admin client hydration', () => {
   });
 
   it('hydrates the SSR admin shell without a React mismatch warning', async () => {
-    const response = await createApp().request('/admin');
+    const response = await createApp().request('/admin', {
+      headers: {
+        [mockBrowserSessionHeader]: 'dev-session',
+      },
+    });
     const html = await response.text();
     const dom = new JSDOM(html, {
       runScripts: 'dangerously',

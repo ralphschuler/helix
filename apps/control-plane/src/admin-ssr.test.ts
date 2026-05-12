@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
+import { mockBrowserSessionHeader } from './features/auth/browser-auth.js';
 import { createApp } from './server/app.js';
 
 describe('admin SSR route', () => {
   it('streams an admin HTML shell with dehydrated route data', async () => {
-    const response = await createApp().request('/admin');
+    const response = await createApp().request('/admin', {
+      headers: {
+        [mockBrowserSessionHeader]: 'dev-session',
+      },
+    });
     const html = await response.text();
 
     expect(response.status).toBe(200);
