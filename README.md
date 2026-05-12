@@ -14,8 +14,7 @@ See [PRD.md](./PRD.md) for product requirements and phased delivery.
 
 Yarn workspace layout:
 
-- `apps/control-plane` — SaaS API/control plane shell.
-- `apps/ops-console` — operator UI shell.
+- `apps/control-plane` — SaaS API/control plane shell; owns the v1 `/admin` UI.
 - `services/broker` — job, lease, attempt, and routing runtime shell.
 - `services/scheduler` — schedules, timers, and wake-up runtime shell.
 - `packages/contracts` — shared API/event contract shell.

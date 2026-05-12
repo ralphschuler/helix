@@ -28,7 +28,7 @@ Helix needs one SaaS web/API deployable plus long-running execution roles. The P
 - Web/API and runtime failures can be isolated and scaled separately.
 - Public contracts must be shared without coupling services to app internals.
 - Local and CI setup must eventually run multiple Node entry points.
-- The current `apps/ops-console` scaffold is transitional until a later cleanup slice removes or disables it.
+- No active v1 workspace owns a standalone `apps/ops-console` surface; future extraction requires a new ADR.
 
 ## Validation
 

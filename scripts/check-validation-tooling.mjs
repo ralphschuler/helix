@@ -120,11 +120,26 @@ function requireInfraSmokeTooling() {
   }
 }
 
+function requireControlPlaneTopology() {
+  requireFile('apps/control-plane/package.json');
+
+  if (existsSync('apps/ops-console/package.json')) {
+    fail('apps/ops-console must not be an active v1 workspace; /admin lives in apps/control-plane');
+  }
+
+  if (!requireFile('README.md')) return;
+  const readme = readFileSync('README.md', 'utf8');
+  if (!readme.includes('`apps/control-plane`') || !readme.includes('/admin')) {
+    fail('README.md must document /admin as part of apps/control-plane');
+  }
+}
+
 requireFile('tsconfig.base.json');
 requireFile('eslint.config.js');
 requireFile('vitest.config.ts');
 requireCiCorepackSafety();
 requireInfraSmokeTooling();
+requireControlPlaneTopology();
 
 const packages = workspacePackagePaths();
 if (packages.length === 0) {
