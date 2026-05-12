@@ -28,6 +28,7 @@ export interface CreateAppOptions {
 }
 
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const adminReadPermission = 'admin:read';
 
 export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> {
   const app = new Hono<AppEnvironment>();
@@ -75,24 +76,43 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
 
   app.use('/admin', browserSecurity);
   app.use('/admin/*', browserSecurity);
+  app.use('/admin', requireBrowserPermission(adminReadPermission));
+  app.use('/admin/*', requireBrowserPermission(adminReadPermission));
 
   app.get('/admin/api/v1/session', (context) =>
     context.json(toSessionResponse(context.get('browserAuth'))),
   );
 
-  app.get('/admin', async (context) => {
-    const stream = await renderAdminDocumentStream(
-      new URL(context.req.url).pathname,
-    );
-
-    return new Response(stream, {
-      headers: {
-        'content-type': 'text/html; charset=utf-8',
-      },
-    });
-  });
+  app.get('/admin', renderAdminRoute);
+  app.get('/admin/*', renderAdminRoute);
 
   return app;
+}
+
+function requireBrowserPermission(
+  permission: string,
+): MiddlewareHandler<AppEnvironment> {
+  return async (context, next) => {
+    const browserAuth = context.get('browserAuth');
+
+    if (!browserAuth.permissions.includes(permission)) {
+      return context.json({ error: 'missing_admin_read_permission' }, 403);
+    }
+
+    await next();
+  };
+}
+
+async function renderAdminRoute(context: Context<AppEnvironment>): Promise<Response> {
+  const stream = await renderAdminDocumentStream(
+    new URL(context.req.url).pathname,
+  );
+
+  return new Response(stream, {
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+    },
+  });
 }
 
 function createBrowserSecurityMiddleware(input: {

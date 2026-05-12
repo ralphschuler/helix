@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BrowserAuthConfigurationError,
   createDefaultBrowserAuthProvider,
+  createMockBrowserAuthProvider,
   createStytchBrowserAuthProvider,
   csrfCookieName,
   csrfHeaderName,
@@ -47,6 +48,29 @@ describe('browser auth guard', () => {
     });
 
     expect(response.status).toBe(401);
+  });
+
+  it('rejects authenticated admin SSR requests without admin read permission', async () => {
+    const response = await createApp({
+      browserAuthProvider: createMockBrowserAuthProvider({
+        sessions: {
+          'readless-session': {
+            ...defaultMockAuthContext,
+            sessionId: 'readless-session',
+            permissions: [],
+          },
+        },
+      }),
+    }).request('/admin/jobs', {
+      headers: {
+        [mockBrowserSessionHeader]: 'readless-session',
+      },
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'missing_admin_read_permission',
+    });
   });
 
   it('denies cross-origin browser requests by default', async () => {
