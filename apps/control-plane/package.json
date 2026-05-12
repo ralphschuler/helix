@@ -5,8 +5,30 @@
   "description": "SaaS API and control-plane application shell.",
   "scripts": {
     "check": "tsc --noEmit -p tsconfig.json",
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build && vite build --ssr src/entry-server.tsx --outDir dist/server --emptyOutDir false",
     "test": "vitest run --passWithNoTests --config ../../vitest.config.ts --dir .",
     "lint": "eslint . --max-warnings 0"
   },
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^2.0.2",
+    "@tanstack/react-query": "^5.100.10",
+    "@tanstack/react-router": "^1.169.2",
+    "hono": "^4.12.18",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "22",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "eslint": "^10.3.0",
+    "jsdom": "^29.1.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.12",
+    "vitest": "^4.1.6"
+  }
 }
