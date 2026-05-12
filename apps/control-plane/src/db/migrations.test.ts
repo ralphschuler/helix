@@ -87,6 +87,23 @@ describe('database migration runner', () => {
     await expect(readFile(path.join(getDefaultMigrationsDirectory(), '0001_base_tenant_project_schema.sql'), 'utf8')).resolves.toBe(baseMigration?.sql);
   });
 
+  it('ships billing schema with org-scoped Stripe mapping, webhook idempotency, and usage ledger rows', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const billingMigration = migrations.find((migration) => migration.id === '0003_billing_schema');
+
+    expect(billingMigration).toBeDefined();
+    expect(billingMigration?.sql).toContain('create table if not exists billing_stripe_customers');
+    expect(billingMigration?.sql).toContain('create table if not exists billing_stripe_webhook_events');
+    expect(billingMigration?.sql).toContain('create table if not exists billing_usage_ledger');
+    expect(billingMigration?.sql).toMatch(/billing_stripe_customers[\s\S]*tenant_id uuid not null[\s\S]*organization_id uuid not null/u);
+    expect(billingMigration?.sql).toMatch(/billing_stripe_webhook_events[\s\S]*stripe_event_id text primary key/u);
+    expect(billingMigration?.sql).toMatch(/billing_usage_ledger[\s\S]*tenant_id uuid not null[\s\S]*organization_id uuid not null/u);
+    expect(billingMigration?.sql).toContain('billing_usage_ledger_idempotency_unique');
+    expect(billingMigration?.sql).not.toContain('stripe_secret');
+
+    await expect(readFile(path.join(getDefaultMigrationsDirectory(), '0003_billing_schema.sql'), 'utf8')).resolves.toBe(billingMigration?.sql);
+  });
+
   it('ships IAM, API key, and agent token schema with project scope and hashed secrets only', async () => {
     const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
     const iamMigration = migrations.find((migration) => migration.id === '0002_permission_iam_agent_tokens');

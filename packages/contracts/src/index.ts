@@ -1,4 +1,5 @@
 export * from './base/auth.js';
+export * from './base/billing.js';
 export * from './base/cursors.js';
 export * from './base/errors.js';
 export * from './base/events.js';

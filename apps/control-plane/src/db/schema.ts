@@ -1,4 +1,5 @@
 import type { ColumnType } from 'kysely';
+import type { BillingStatus } from '@helix/contracts';
 
 export type TimestampColumn = ColumnType<Date, Date | string | undefined, Date | string>;
 export type NullableTimestampColumn = ColumnType<
@@ -124,6 +125,45 @@ export interface AgentTokensTable {
   created_at: TimestampColumn;
 }
 
+export type BillingStatusColumn = ColumnType<
+  BillingStatus,
+  BillingStatus | undefined,
+  BillingStatus
+>;
+
+export interface BillingStripeCustomersTable {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  stripe_customer_id: string;
+  billing_status: BillingStatusColumn;
+  current_subscription_id: string | null;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
+export interface BillingStripeWebhookEventsTable {
+  stripe_event_id: string;
+  tenant_id: string;
+  organization_id: string;
+  stripe_customer_id: string;
+  event_type: string;
+  payload_json: JsonColumn;
+  processed_at: TimestampColumn;
+}
+
+export interface BillingUsageLedgerTable {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  project_id: string | null;
+  usage_type: string;
+  quantity: number;
+  idempotency_key: string;
+  metadata_json: JsonColumn;
+  recorded_at: TimestampColumn;
+}
+
 export interface RetentionPoliciesTable {
   id: string;
   tenant_id: string;
@@ -145,4 +185,7 @@ export interface HelixDatabase {
   project_api_keys: ProjectApiKeysTable;
   agents: AgentsTable;
   agent_tokens: AgentTokensTable;
+  billing_stripe_customers: BillingStripeCustomersTable;
+  billing_stripe_webhook_events: BillingStripeWebhookEventsTable;
+  billing_usage_ledger: BillingUsageLedgerTable;
 }

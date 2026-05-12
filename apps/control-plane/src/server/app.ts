@@ -2,6 +2,12 @@ import { Hono } from 'hono';
 import type { Context, MiddlewareHandler } from 'hono';
 
 import { renderAdminDocumentStream } from '../entry-server.js';
+import { UnmappedStripeCustomerError } from '../features/billing/billing-service.js';
+import {
+  StripeWebhookPayloadError,
+  StripeWebhookSignatureError,
+} from '../features/billing/stripe-adapter.js';
+import type { BillingWebhookHandler } from '../features/billing/stripe-webhook.js';
 import {
   createDefaultBrowserAuthProvider,
   hasValidCsrfToken,
@@ -18,6 +24,7 @@ type AppEnvironment = {
 export interface CreateAppOptions {
   readonly browserAuthProvider?: BrowserAuthProvider;
   readonly allowedBrowserOrigins?: readonly string[];
+  readonly stripeBillingWebhookHandler?: BillingWebhookHandler;
 }
 
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -37,6 +44,34 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
       status: 'ok',
     }),
   );
+
+  app.post('/webhooks/stripe', async (context) => {
+    if (options.stripeBillingWebhookHandler === undefined) {
+      return context.json({ error: 'stripe_webhook_not_configured' }, 503);
+    }
+
+    try {
+      const result = await options.stripeBillingWebhookHandler.handle({
+        rawBody: await context.req.text(),
+        signatureHeader: context.req.header('stripe-signature') ?? null,
+      });
+
+      return context.json({ received: true, duplicate: result.duplicate });
+    } catch (error) {
+      if (
+        error instanceof StripeWebhookSignatureError ||
+        error instanceof StripeWebhookPayloadError
+      ) {
+        return context.json({ error: 'invalid_stripe_webhook' }, 400);
+      }
+
+      if (error instanceof UnmappedStripeCustomerError) {
+        return context.json({ error: 'unmapped_stripe_customer' }, 422);
+      }
+
+      throw error;
+    }
+  });
 
   app.use('/admin', browserSecurity);
   app.use('/admin/*', browserSecurity);
