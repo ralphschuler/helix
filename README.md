@@ -30,6 +30,7 @@ Helix uses Postgres as authoritative state and Redpanda as the Kafka-compatible 
 cp .env.example .env
 docker compose up -d
 yarn infra:smoke
+yarn db:migrate
 docker compose down
 ```
 
@@ -42,6 +43,7 @@ yarn install --immutable
 yarn docs:check
 yarn tooling:check
 yarn infra:smoke
+yarn db:migrate
 yarn check
 yarn test
 yarn lint
