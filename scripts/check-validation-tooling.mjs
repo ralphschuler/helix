@@ -63,9 +63,34 @@ function requireScript(packageJson, packagePath, name, expectedFragment) {
   }
 }
 
+function requireCiCorepackSafety() {
+  const workflowPath = '.github/workflows/ci.yml';
+  if (!requireFile(workflowPath)) return;
+
+  const workflow = readFileSync(workflowPath, 'utf8');
+  const packageManager = rootPackage.packageManager ?? '';
+  if (!packageManager.startsWith('yarn@')) return;
+
+  const corepackIndex = workflow.indexOf('corepack enable');
+  if (corepackIndex === -1) {
+    fail(`${workflowPath} must enable Corepack before running Yarn ${packageManager}`);
+  }
+
+  const firstYarnRunIndex = workflow.search(/run:\s*yarn\b/);
+  if (firstYarnRunIndex !== -1 && corepackIndex > firstYarnRunIndex) {
+    fail(`${workflowPath} must run corepack enable before the first yarn command`);
+  }
+
+  const yarnCacheIndex = workflow.search(/cache:\s*['"]?yarn['"]?\s*(?:$|#)/m);
+  if (yarnCacheIndex !== -1 && (corepackIndex === -1 || yarnCacheIndex < corepackIndex)) {
+    fail(`${workflowPath} setup-node cache: yarn runs before Corepack; remove the cache option or enable Corepack before setup-node`);
+  }
+}
+
 requireFile('tsconfig.base.json');
 requireFile('eslint.config.js');
 requireFile('vitest.config.ts');
+requireCiCorepackSafety();
 
 const packages = workspacePackagePaths();
 if (packages.length === 0) {
