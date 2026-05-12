@@ -15,6 +15,7 @@
     "lint": "yarn workspaces foreach -A run lint",
     "docs:check": "node scripts/check-docs.mjs",
     "tooling:check": "node scripts/check-validation-tooling.mjs",
+    "infra:smoke": "node scripts/infra-smoke.mjs",
     "validate": "yarn run docs:check && yarn run tooling:check && yarn run check && yarn run test && yarn run lint"
   },
   "engines": {
