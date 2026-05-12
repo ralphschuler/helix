@@ -86,4 +86,25 @@ describe('database migration runner', () => {
 
     await expect(readFile(path.join(getDefaultMigrationsDirectory(), '0001_base_tenant_project_schema.sql'), 'utf8')).resolves.toBe(baseMigration?.sql);
   });
+
+  it('ships IAM, API key, and agent token schema with project scope and hashed secrets only', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const iamMigration = migrations.find((migration) => migration.id === '0002_permission_iam_agent_tokens');
+
+    expect(iamMigration).toBeDefined();
+    expect(iamMigration?.sql).toContain('create table if not exists custom_roles');
+    expect(iamMigration?.sql).toContain('create table if not exists project_api_keys');
+    expect(iamMigration?.sql).toContain('create table if not exists agents');
+    expect(iamMigration?.sql).toContain('create table if not exists agent_tokens');
+    expect(iamMigration?.sql).toMatch(/project_api_keys[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null/u);
+    expect(iamMigration?.sql).toMatch(/agents[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null/u);
+    expect(iamMigration?.sql).toMatch(/agent_tokens[\s\S]*expires_at timestamptz not null/u);
+    expect(iamMigration?.sql).toContain('secret_hash_sha256');
+    expect(iamMigration?.sql).toContain('credential_hash_sha256');
+    expect(iamMigration?.sql).toContain('token_hash_sha256');
+    expect(iamMigration?.sql).not.toContain('plain_secret');
+    expect(iamMigration?.sql).not.toContain('token_material');
+
+    await expect(readFile(path.join(getDefaultMigrationsDirectory(), '0002_permission_iam_agent_tokens.sql'), 'utf8')).resolves.toBe(iamMigration?.sql);
+  });
 });

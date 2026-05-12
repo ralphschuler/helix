@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  agentRegistrationCredentialRecordSchema,
+  agentTokenRecordSchema,
   authContextSchema,
+  catalogPermissionSchema,
+  customRoleSchema,
   errorEnvelopeSchema,
   eventEnvelopeSchema,
   idempotencyKeySchema,
@@ -10,6 +14,8 @@ import {
   tenantIdSchema,
   tenantProjectScopeSchema,
   tenantScopeSchema,
+  permissionCatalog,
+  projectApiKeyRecordSchema,
   uuidV7Schema,
 } from '@helix/contracts';
 
@@ -136,6 +142,84 @@ describe('base API boundary contracts', () => {
     ).toThrow();
     expect(() =>
       authContextSchema.parse({ ...authContext, permissions: ['   '] }),
+    ).toThrow();
+  });
+});
+
+describe('IAM contracts', () => {
+  it('defines permission-only custom roles from an explicit catalog', () => {
+    const customRole = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3a81',
+      tenantId: validTenantId,
+      slug: 'project-operator',
+      name: 'Project operator',
+      permissions: ['project_api_keys:create', 'agents:register'],
+      createdAt: '2026-05-12T16:00:00.000Z',
+      updatedAt: '2026-05-12T16:00:00.000Z',
+    };
+
+    expect(permissionCatalog).toContain('project_api_keys:create');
+    expect(catalogPermissionSchema.parse('agents:claim')).toBe('agents:claim');
+    expect(customRoleSchema.parse(customRole)).toEqual(customRole);
+    expect(() => customRoleSchema.parse({ ...customRole, permissions: ['owner'] })).toThrow();
+    expect(() =>
+      customRoleSchema.parse({
+        ...customRole,
+        permissions: ['agents:register', 'agents:register'],
+      }),
+    ).toThrow();
+  });
+
+  it('models API key, agent credential, and agent token records as scoped hashes without token material', () => {
+    const apiKeyRecord = {
+      id: '01890f42-98c4-7cc3-ba5e-0c567f1d3a82',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      name: 'CI producer',
+      keyPrefix: 'hpx_ci_12345678',
+      secretHashSha256: 'a'.repeat(64),
+      permissions: ['jobs:create'],
+      createdAt: '2026-05-12T16:01:00.000Z',
+      revokedAt: null,
+    };
+    const agentCredentialRecord = {
+      id: '01890f42-98c4-7cc3-8a5e-0c567f1d3a83',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      name: 'gpu-runner',
+      credentialPrefix: 'hag_gpu_12345678',
+      credentialHashSha256: 'b'.repeat(64),
+      permissions: ['agents:claim'],
+      createdAt: '2026-05-12T16:02:00.000Z',
+      revokedAt: null,
+    };
+    const agentTokenRecord = {
+      id: '01890f42-98c4-7cc3-9a5e-0c567f1d3a84',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      agentId: agentCredentialRecord.id,
+      tokenPrefix: 'hat_gpu_12345678',
+      tokenHashSha256: 'c'.repeat(64),
+      permissions: ['agents:claim'],
+      createdAt: '2026-05-12T16:03:00.000Z',
+      expiresAt: '2026-05-12T16:18:00.000Z',
+      revokedAt: null,
+    };
+
+    expect(projectApiKeyRecordSchema.parse(apiKeyRecord)).toEqual(apiKeyRecord);
+    expect(agentRegistrationCredentialRecordSchema.parse(agentCredentialRecord)).toEqual(
+      agentCredentialRecord,
+    );
+    expect(agentTokenRecordSchema.parse(agentTokenRecord)).toEqual(agentTokenRecord);
+    expect(() => projectApiKeyRecordSchema.parse({ ...apiKeyRecord, secret: 'plain-text' })).toThrow();
+    expect(() =>
+      agentRegistrationCredentialRecordSchema.parse({
+        ...agentCredentialRecord,
+        credential: 'plain-text',
+      }),
+    ).toThrow();
+    expect(() =>
+      agentTokenRecordSchema.parse({ ...agentTokenRecord, expiresAt: 'not-a-date' }),
     ).toThrow();
   });
 });
