@@ -1,0 +1,11 @@
+{
+  "name": "@helix/control-plane",
+  "version": "0.0.0",
+  "private": true,
+  "description": "SaaS API and control-plane application shell.",
+  "scripts": {
+    "check": "node -e \"console.log('check: @helix/control-plane')\"",
+    "test": "node -e \"console.log('test: @helix/control-plane')\"",
+    "lint": "node -e \"console.log('lint: @helix/control-plane')\""
+  }
+}

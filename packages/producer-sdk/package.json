@@ -1,0 +1,11 @@
+{
+  "name": "@helix/producer-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TypeScript producer SDK shell.",
+  "scripts": {
+    "check": "node -e \"console.log('check: @helix/producer-sdk')\"",
+    "test": "node -e \"console.log('test: @helix/producer-sdk')\"",
+    "lint": "node -e \"console.log('lint: @helix/producer-sdk')\""
+  }
+}

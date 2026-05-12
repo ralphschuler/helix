@@ -1,0 +1,22 @@
+{
+  "name": "helix",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Durable distributed execution platform monorepo.",
+  "packageManager": "yarn@1.22.22",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "check": "yarn workspaces run check",
+    "test": "yarn workspaces run test",
+    "lint": "yarn workspaces run lint",
+    "docs:check": "test -f README.md && test -f PRD.md",
+    "validate": "yarn run docs:check && yarn run check && yarn run test && yarn run lint"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

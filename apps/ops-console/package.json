@@ -1,0 +1,11 @@
+{
+  "name": "@helix/ops-console",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Operations console application shell.",
+  "scripts": {
+    "check": "node -e \"console.log('check: @helix/ops-console')\"",
+    "test": "node -e \"console.log('test: @helix/ops-console')\"",
+    "lint": "node -e \"console.log('lint: @helix/ops-console')\""
+  }
+}
