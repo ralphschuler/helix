@@ -4,8 +4,9 @@
   "private": true,
   "description": "TypeScript processor SDK shell.",
   "scripts": {
-    "check": "node -e \"console.log('check: @helix/processor-sdk')\"",
-    "test": "node -e \"console.log('test: @helix/processor-sdk')\"",
-    "lint": "node -e \"console.log('lint: @helix/processor-sdk')\""
-  }
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --passWithNoTests --config ../../vitest.config.ts --dir .",
+    "lint": "eslint . --max-warnings 0"
+  },
+  "type": "module"
 }
