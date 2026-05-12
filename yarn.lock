@@ -132,12 +132,6 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@helix/ops-console@workspace:apps/ops-console":
-  version: 0.0.0-use.local
-  resolution: "@helix/ops-console@workspace:apps/ops-console"
-  languageName: unknown
-  linkType: soft
-
 "@helix/processor-sdk@workspace:packages/processor-sdk":
   version: 0.0.0-use.local
   resolution: "@helix/processor-sdk@workspace:packages/processor-sdk"

@@ -1,5 +1,5 @@
 # @helix/control-plane
 
-Workspace placeholder for: SaaS API and control-plane application shell.
+Workspace placeholder for the SaaS API, control-plane app, and v1 `/admin` UI shell.
 
 No platform implementation yet.
