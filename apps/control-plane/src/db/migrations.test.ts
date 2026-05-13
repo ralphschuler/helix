@@ -87,6 +87,38 @@ describe('database migration runner', () => {
     await expect(readFile(path.join(getDefaultMigrationsDirectory(), '0001_base_tenant_project_schema.sql'), 'utf8')).resolves.toBe(baseMigration?.sql);
   });
 
+  it('ships runtime event persistence schema with scoped outbox and inbox primitives', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const runtimeMigration = migrations.find(
+      (migration) => migration.id === '0005_runtime_event_persistence',
+    );
+
+    expect(runtimeMigration).toBeDefined();
+    expect(runtimeMigration?.sql).toContain('create table if not exists runtime_events');
+    expect(runtimeMigration?.sql).toContain('create table if not exists runtime_outbox');
+    expect(runtimeMigration?.sql).toContain('create table if not exists runtime_inbox');
+    expect(runtimeMigration?.sql).toMatch(/runtime_events[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null/u);
+    expect(runtimeMigration?.sql).toMatch(/runtime_events[\s\S]*id uuid primary key/u);
+    expect(runtimeMigration?.sql).toMatch(/runtime_events[\s\S]*event_type text not null[\s\S]*event_version integer not null[\s\S]*ordering_key text not null/u);
+    expect(runtimeMigration?.sql).toContain('runtime_events_project_scope_fk');
+    expect(runtimeMigration?.sql).toContain('runtime_events_scope_id_unique');
+    expect(runtimeMigration?.sql).toContain("payload_json jsonb not null default '{}'::jsonb");
+    expect(runtimeMigration?.sql).toContain('runtime_events_payload_is_object');
+    expect(runtimeMigration?.sql).toMatch(/runtime_outbox[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null[\s\S]*event_id uuid not null/u);
+    expect(runtimeMigration?.sql).toContain('runtime_outbox_event_scope_fk');
+    expect(runtimeMigration?.sql).toContain('runtime_outbox_event_unique');
+    expect(runtimeMigration?.sql).toContain('partition_key text not null');
+    expect(runtimeMigration?.sql).toContain('runtime_outbox_pending_idx');
+    expect(runtimeMigration?.sql).toMatch(/runtime_inbox[\s\S]*consumer_name text not null[\s\S]*event_id uuid not null[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null/u);
+    expect(runtimeMigration?.sql).toContain('runtime_inbox_event_scope_fk');
+    expect(runtimeMigration?.sql).toContain('runtime_inbox_consumer_event_unique');
+    expect(runtimeMigration?.sql).toContain("status text not null default 'processing'");
+
+    await expect(
+      readFile(path.join(getDefaultMigrationsDirectory(), '0005_runtime_event_persistence.sql'), 'utf8'),
+    ).resolves.toBe(runtimeMigration?.sql);
+  });
+
   it('ships custom role disable migration for safe soft-disable semantics', async () => {
     const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
     const customRoleDisableMigration = migrations.find(
