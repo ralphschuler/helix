@@ -14,6 +14,7 @@ SaaS API, control-plane application, and v1 `/admin` UI shell.
 - Repo-owned SQL migration runner plus tenant/org/project/audit/retention base schema.
 - Runtime transactional outbox writer seam for committing durable state changes and scoped outbox events together.
 - Runtime outbox publisher service boundary for draining due events to Kafka/Redpanda-style producers with retry.
+- Runtime consumer inbox helpers for event-id dedupe, retryable failed processing, and tenant/project-scoped consumption records.
 
 ## Commands
 
@@ -22,12 +23,17 @@ yarn workspace @helix/control-plane dev
 yarn workspace @helix/control-plane build
 yarn workspace @helix/control-plane db:migrate
 yarn workspace @helix/control-plane test
-# focused runtime outbox checks:
+# focused runtime checks:
 yarn workspace @helix/control-plane test -- outbox
+yarn workspace @helix/control-plane test -- inbox
 yarn workspace @helix/control-plane check
 yarn workspace @helix/control-plane lint
 ```
 
 `dev` runs the Vite asset server. The Hono Node entry is `src/server/node.ts`; production bundling/wiring can mount the same `createApp()` factory.
+
+## Runtime consumer idempotency
+
+Consumers of Kafka/Redpanda-delivered runtime events must call the runtime inbox helpers before applying platform-side effects. The inbox is keyed by `(consumerName, eventId)`: a processed or in-flight duplicate delivery is skipped for that consumer, while a failed delivery is marked retryable and can be reclaimed on the next delivery. Every inbox row carries `tenantId` and `projectId`; complete/fail updates are scoped by those IDs and must not cross project boundaries.
 
 For tests/local integration, the default mock browser session accepts `x-helix-mock-session: dev-session`. Real Stytch validation is isolated behind the auth provider seam, so CI does not need Stytch secrets or network calls.
