@@ -233,6 +233,11 @@ __metadata:
 "@helix/broker@workspace:services/broker":
   version: 0.0.0-use.local
   resolution: "@helix/broker@workspace:services/broker"
+  dependencies:
+    "@helix/contracts": "workspace:*"
+    eslint: "npm:^10.3.0"
+    typescript: "npm:^6.0.3"
+    vitest: "npm:^4.1.6"
   languageName: unknown
   linkType: soft
 

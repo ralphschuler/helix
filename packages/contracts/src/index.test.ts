@@ -14,6 +14,11 @@ import {
   eventEnvelopeSchema,
   idempotencyKeySchema,
   idempotencyKeyScopeSchema,
+  jobAttemptRecordSchema,
+  jobLeaseRecordSchema,
+  jobRecordSchema,
+  jobStateSchema,
+  leaseStateSchema,
   opaqueCursorSchema,
   tenantIdSchema,
   tenantProjectScopeSchema,
@@ -82,6 +87,95 @@ describe('base error contracts', () => {
     expect(() => errorEnvelopeSchema.parse({ error: { message: 'No code' } })).toThrow();
     expect(() => errorEnvelopeSchema.parse({ error: { code: '   ', message: 'Blank' } })).toThrow();
     expect(() => errorEnvelopeSchema.parse({ error: { code: 'EMPTY', message: '' } })).toThrow();
+  });
+});
+
+describe('job execution contracts', () => {
+  it('models scoped job, attempt, and lease records with explicit states', () => {
+    const job = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3a90',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      state: 'queued',
+      priority: 0,
+      maxAttempts: 3,
+      attemptCount: 0,
+      readyAt: '2026-05-12T19:00:00.000Z',
+      idempotencyKey: 'create-job:client-request-1',
+      constraints: { capability: 'thumbnail' },
+      metadata: { source: 'test' },
+      createdAt: '2026-05-12T19:00:00.000Z',
+      updatedAt: '2026-05-12T19:00:00.000Z',
+      finishedAt: null,
+    };
+    const attempt = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3a91',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: job.id,
+      attemptNumber: 1,
+      state: 'running',
+      agentId: '01890f42-98c4-7cc3-aa5e-0c567f1d3a92',
+      startedAt: '2026-05-12T19:01:00.000Z',
+      finishedAt: null,
+      failureCode: null,
+      failureMessage: null,
+    };
+    const lease = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3a93',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: job.id,
+      attemptId: attempt.id,
+      agentId: attempt.agentId,
+      state: 'active',
+      acquiredAt: '2026-05-12T19:01:00.000Z',
+      expiresAt: '2026-05-12T19:06:00.000Z',
+      lastHeartbeatAt: '2026-05-12T19:02:00.000Z',
+      releasedAt: null,
+      expiredAt: null,
+      canceledAt: null,
+    };
+
+    expect(jobStateSchema.parse('dead_lettered')).toBe('dead_lettered');
+    expect(leaseStateSchema.parse('released')).toBe('released');
+    expect(jobRecordSchema.parse(job)).toEqual(job);
+    expect(jobAttemptRecordSchema.parse(attempt)).toEqual(attempt);
+    expect(jobLeaseRecordSchema.parse(lease)).toEqual(lease);
+    expect(() => jobStateSchema.parse('started')).toThrow();
+    expect(() => jobRecordSchema.parse({ ...job, projectId: undefined })).toThrow();
+    expect(() => jobRecordSchema.parse({ ...job, priority: -1 })).toThrow();
+    expect(() => jobRecordSchema.parse({ ...job, attemptCount: 4 })).toThrow();
+    expect(() => jobRecordSchema.parse({ ...job, state: 'completed', finishedAt: null })).toThrow();
+    expect(() => jobRecordSchema.parse({ ...job, rawPayload: 'not allowed' })).toThrow();
+    expect(() => jobAttemptRecordSchema.parse({ ...attempt, attemptNumber: 0 })).toThrow();
+    expect(() =>
+      jobAttemptRecordSchema.parse({ ...attempt, state: 'completed', finishedAt: null }),
+    ).toThrow();
+    expect(() =>
+      jobAttemptRecordSchema.parse({
+        ...attempt,
+        state: 'failed',
+        finishedAt: '2026-05-12T19:05:00.000Z',
+        failureCode: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      jobAttemptRecordSchema.parse({
+        ...attempt,
+        state: 'running',
+        finishedAt: '2026-05-12T19:05:00.000Z',
+      }),
+    ).toThrow();
+    expect(() => jobLeaseRecordSchema.parse({ ...lease, state: 'renewing' })).toThrow();
+    expect(() =>
+      jobLeaseRecordSchema.parse({
+        ...lease,
+        state: 'expired',
+        releasedAt: '2026-05-12T19:03:00.000Z',
+        expiredAt: '2026-05-12T19:04:00.000Z',
+      }),
+    ).toThrow();
   });
 });
 

@@ -1,0 +1,135 @@
+import { z } from 'zod';
+
+import { idempotencyKeySchema } from './idempotency.js';
+import { uuidV7Schema } from './ids.js';
+import { tenantProjectScopeSchema } from './scope.js';
+
+export const jobStateValues = [
+  'queued',
+  'running',
+  'retrying',
+  'completed',
+  'failed',
+  'dead_lettered',
+  'canceled',
+] as const;
+export const attemptStateValues = ['running', 'completed', 'failed', 'expired', 'canceled'] as const;
+export const leaseStateValues = ['active', 'released', 'expired', 'canceled'] as const;
+
+export const jobStateSchema = z.enum(jobStateValues);
+export const attemptStateSchema = z.enum(attemptStateValues);
+export const leaseStateSchema = z.enum(leaseStateValues);
+
+const terminalJobStates = new Set<string>(['completed', 'failed', 'dead_lettered', 'canceled']);
+const terminalAttemptStates = new Set<string>(['completed', 'failed', 'expired', 'canceled']);
+
+const isoTimestampSchema = z.string().datetime({ offset: true });
+const nullableIsoTimestampSchema = isoTimestampSchema.nullable();
+const nullableNonBlankTextSchema = z
+  .string()
+  .min(1)
+  .refine((value) => value.trim().length > 0, 'Expected non-blank text')
+  .nullable();
+const metadataSchema = z.record(z.string(), z.unknown());
+
+export const jobRecordSchema = tenantProjectScopeSchema
+  .extend({
+    id: uuidV7Schema,
+    state: jobStateSchema,
+    priority: z.number().int().nonnegative(),
+    maxAttempts: z.number().int().positive(),
+    attemptCount: z.number().int().nonnegative(),
+    readyAt: isoTimestampSchema,
+    idempotencyKey: idempotencyKeySchema.nullable(),
+    constraints: metadataSchema,
+    metadata: metadataSchema,
+    createdAt: isoTimestampSchema,
+    updatedAt: isoTimestampSchema,
+    finishedAt: nullableIsoTimestampSchema,
+  })
+  .strict()
+  .refine((job) => job.attemptCount <= job.maxAttempts, {
+    message: 'Attempt count cannot exceed max attempts',
+    path: ['attemptCount'],
+  })
+  .refine((job) => terminalJobStates.has(job.state) === (job.finishedAt !== null), {
+    message: 'Terminal job states require finishedAt and nonterminal states must not set it',
+    path: ['finishedAt'],
+  });
+
+export const jobAttemptRecordSchema = tenantProjectScopeSchema
+  .extend({
+    id: uuidV7Schema,
+    jobId: uuidV7Schema,
+    attemptNumber: z.number().int().positive(),
+    state: attemptStateSchema,
+    agentId: uuidV7Schema.nullable(),
+    startedAt: isoTimestampSchema,
+    finishedAt: nullableIsoTimestampSchema,
+    failureCode: nullableNonBlankTextSchema,
+    failureMessage: nullableNonBlankTextSchema,
+  })
+  .strict()
+  .refine((attempt) => terminalAttemptStates.has(attempt.state) === (attempt.finishedAt !== null), {
+    message: 'Terminal attempt states require finishedAt and running attempts must not set it',
+    path: ['finishedAt'],
+  })
+  .refine((attempt) => attempt.state !== 'failed' || attempt.failureCode !== null, {
+    message: 'Failed attempts require a failure code',
+    path: ['failureCode'],
+  });
+
+export const jobLeaseRecordSchema = tenantProjectScopeSchema
+  .extend({
+    id: uuidV7Schema,
+    jobId: uuidV7Schema,
+    attemptId: uuidV7Schema,
+    agentId: uuidV7Schema,
+    state: leaseStateSchema,
+    acquiredAt: isoTimestampSchema,
+    expiresAt: isoTimestampSchema,
+    lastHeartbeatAt: isoTimestampSchema,
+    releasedAt: nullableIsoTimestampSchema,
+    expiredAt: nullableIsoTimestampSchema,
+    canceledAt: nullableIsoTimestampSchema,
+  })
+  .strict()
+  .refine((lease) => Date.parse(lease.expiresAt) > Date.parse(lease.acquiredAt), {
+    message: 'Lease expiry must be after acquisition',
+    path: ['expiresAt'],
+  })
+  .refine(
+    (lease) =>
+      Date.parse(lease.lastHeartbeatAt) >= Date.parse(lease.acquiredAt) &&
+      Date.parse(lease.lastHeartbeatAt) <= Date.parse(lease.expiresAt),
+    {
+      message: 'Lease heartbeat must stay inside the lease window',
+      path: ['lastHeartbeatAt'],
+    },
+  )
+  .refine(
+    (lease) => {
+      if (lease.state === 'active') {
+        return lease.releasedAt === null && lease.expiredAt === null && lease.canceledAt === null;
+      }
+      if (lease.state === 'released') {
+        return lease.releasedAt !== null && lease.expiredAt === null && lease.canceledAt === null;
+      }
+      if (lease.state === 'expired') {
+        return lease.releasedAt === null && lease.expiredAt !== null && lease.canceledAt === null;
+      }
+
+      return lease.releasedAt === null && lease.expiredAt === null && lease.canceledAt !== null;
+    },
+    {
+      message: 'Lease terminal timestamp must match exactly one terminal state',
+      path: ['state'],
+    },
+  );
+
+export type JobState = z.infer<typeof jobStateSchema>;
+export type AttemptState = z.infer<typeof attemptStateSchema>;
+export type LeaseState = z.infer<typeof leaseStateSchema>;
+export type JobRecord = z.infer<typeof jobRecordSchema>;
+export type JobAttemptRecord = z.infer<typeof jobAttemptRecordSchema>;
+export type JobLeaseRecord = z.infer<typeof jobLeaseRecordSchema>;

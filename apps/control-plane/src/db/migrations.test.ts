@@ -119,6 +119,44 @@ describe('database migration runner', () => {
     ).resolves.toBe(runtimeMigration?.sql);
   });
 
+  it('ships job, attempt, and lease schema with scoped audit history foundations', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const jobMigration = migrations.find(
+      (migration) => migration.id === '0006_job_attempt_lease_schema',
+    );
+
+    expect(jobMigration).toBeDefined();
+    expect(jobMigration?.sql).toContain('create table if not exists jobs');
+    expect(jobMigration?.sql).toContain('create table if not exists job_attempts');
+    expect(jobMigration?.sql).toContain('create table if not exists job_leases');
+    expect(jobMigration?.sql).toMatch(/jobs[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null/u);
+    expect(jobMigration?.sql).toContain('jobs_project_scope_fk');
+    expect(jobMigration?.sql).toContain("jobs_state_check check (state in ('queued', 'running', 'retrying', 'completed', 'failed', 'dead_lettered', 'canceled'))");
+    expect(jobMigration?.sql).toContain("constraints_json jsonb not null default '{}'::jsonb");
+    expect(jobMigration?.sql).toContain("metadata_json jsonb not null default '{}'::jsonb");
+    expect(jobMigration?.sql).toContain('jobs_scope_id_unique');
+    expect(jobMigration?.sql).toContain('jobs_idempotency_key_unique');
+    expect(jobMigration?.sql).toMatch(/job_attempts[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null[\s\S]*job_id uuid not null/u);
+    expect(jobMigration?.sql).toContain('job_attempts_job_scope_fk');
+    expect(jobMigration?.sql).toContain('job_attempts_agent_scope_fk');
+    expect(jobMigration?.sql).toContain("job_attempts_state_check check (state in ('running', 'completed', 'failed', 'expired', 'canceled'))");
+    expect(jobMigration?.sql).toContain('job_attempts_job_attempt_number_unique');
+    expect(jobMigration?.sql).toContain('job_attempts_job_id_id_unique');
+    expect(jobMigration?.sql).toMatch(/job_leases[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null[\s\S]*job_id uuid not null[\s\S]*attempt_id uuid not null/u);
+    expect(jobMigration?.sql).toContain('canceled_at timestamptz');
+    expect(jobMigration?.sql).toContain('job_leases_attempt_job_scope_fk');
+    expect(jobMigration?.sql).toContain('job_leases_agent_scope_fk');
+    expect(jobMigration?.sql).toContain("job_leases_state_check check (state in ('active', 'released', 'expired', 'canceled'))");
+    expect(jobMigration?.sql).toContain('job_leases_terminal_state_timestamp_check');
+    expect(jobMigration?.sql).toContain('job_leases_active_attempt_unique');
+    expect(jobMigration?.sql).toContain('job_leases_project_history_idx');
+    expect(jobMigration?.sql).not.toContain('payload_bytes');
+
+    await expect(
+      readFile(path.join(getDefaultMigrationsDirectory(), '0006_job_attempt_lease_schema.sql'), 'utf8'),
+    ).resolves.toBe(jobMigration?.sql);
+  });
+
   it('ships custom role disable migration for safe soft-disable semantics', async () => {
     const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
     const customRoleDisableMigration = migrations.find(

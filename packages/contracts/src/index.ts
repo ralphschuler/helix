@@ -6,4 +6,5 @@ export * from './base/events.js';
 export * from './base/idempotency.js';
 export * from './base/ids.js';
 export * from './base/iam.js';
+export * from './base/jobs.js';
 export * from './base/scope.js';
