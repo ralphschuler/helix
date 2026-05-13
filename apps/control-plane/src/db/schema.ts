@@ -9,6 +9,8 @@ export type NullableTimestampColumn = ColumnType<
 >;
 export type JsonObject = Record<string, unknown>;
 export type JsonColumn = ColumnType<JsonObject, JsonObject | string | undefined, JsonObject | string>;
+export type NullableTextColumn = ColumnType<string | null, string | null | undefined, string | null>;
+export type DefaultedNumberColumn = ColumnType<number, number | undefined, number>;
 export type StringArrayJsonColumn = ColumnType<
   readonly string[],
   readonly string[] | string | undefined,
@@ -175,6 +177,62 @@ export interface RetentionPoliciesTable {
   updated_at: TimestampColumn;
 }
 
+export interface RuntimeEventsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  event_type: string;
+  event_version: number;
+  ordering_key: string;
+  payload_json: JsonColumn;
+  occurred_at: TimestampColumn;
+  recorded_at: TimestampColumn;
+}
+
+export type RuntimeOutboxStatus = 'pending' | 'published' | 'failed';
+export type RuntimeOutboxStatusColumn = ColumnType<
+  RuntimeOutboxStatus,
+  RuntimeOutboxStatus | undefined,
+  RuntimeOutboxStatus
+>;
+
+export interface RuntimeOutboxTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  event_id: string;
+  topic: string;
+  partition_key: string;
+  status: RuntimeOutboxStatusColumn;
+  publish_attempts: DefaultedNumberColumn;
+  next_attempt_at: TimestampColumn;
+  published_at: NullableTimestampColumn;
+  last_error: NullableTextColumn;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
+export type RuntimeInboxStatus = 'processing' | 'processed' | 'failed';
+export type RuntimeInboxStatusColumn = ColumnType<
+  RuntimeInboxStatus,
+  RuntimeInboxStatus | undefined,
+  RuntimeInboxStatus
+>;
+
+export interface RuntimeInboxTable {
+  id: string;
+  consumer_name: string;
+  event_id: string;
+  tenant_id: string;
+  project_id: string;
+  status: RuntimeInboxStatusColumn;
+  processing_started_at: TimestampColumn;
+  processed_at: NullableTimestampColumn;
+  attempt_count: DefaultedNumberColumn;
+  last_error: NullableTextColumn;
+  updated_at: TimestampColumn;
+}
+
 export interface HelixDatabase {
   _schema_migrations: SchemaMigrationsTable;
   tenants: TenantsTable;
@@ -189,4 +247,7 @@ export interface HelixDatabase {
   billing_stripe_customers: BillingStripeCustomersTable;
   billing_stripe_webhook_events: BillingStripeWebhookEventsTable;
   billing_usage_ledger: BillingUsageLedgerTable;
+  runtime_events: RuntimeEventsTable;
+  runtime_outbox: RuntimeOutboxTable;
+  runtime_inbox: RuntimeInboxTable;
 }
