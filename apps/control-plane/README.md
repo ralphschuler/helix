@@ -13,6 +13,7 @@ SaaS API, control-plane application, and v1 `/admin` UI shell.
 - Vite client and SSR entry points.
 - Repo-owned SQL migration runner plus tenant/org/project/audit/retention base schema.
 - Runtime transactional outbox writer seam for committing durable state changes and scoped outbox events together.
+- Runtime outbox publisher service boundary for draining due events to Kafka/Redpanda-style producers with retry.
 
 ## Commands
 
