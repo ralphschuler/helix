@@ -1,5 +1,5 @@
 import type { ColumnType } from 'kysely';
-import type { BillingStatus } from '@helix/contracts';
+import type { AttemptState, BillingStatus, JobState, LeaseState } from '@helix/contracts';
 
 export type TimestampColumn = ColumnType<Date, Date | string | undefined, Date | string>;
 export type NullableTimestampColumn = ColumnType<
@@ -233,6 +233,61 @@ export interface RuntimeInboxTable {
   updated_at: TimestampColumn;
 }
 
+export type JobStateColumn = ColumnType<JobState, JobState | undefined, JobState>;
+export type AttemptStateColumn = ColumnType<AttemptState, AttemptState | undefined, AttemptState>;
+export type LeaseStateColumn = ColumnType<LeaseState, LeaseState | undefined, LeaseState>;
+
+export interface JobsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  state: JobStateColumn;
+  priority: DefaultedNumberColumn;
+  max_attempts: DefaultedNumberColumn;
+  attempt_count: DefaultedNumberColumn;
+  ready_at: TimestampColumn;
+  idempotency_key: NullableTextColumn;
+  constraints_json: JsonColumn;
+  metadata_json: JsonColumn;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+  finished_at: NullableTimestampColumn;
+}
+
+export interface JobAttemptsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  job_id: string;
+  attempt_number: number;
+  state: AttemptStateColumn;
+  agent_id: NullableTextColumn;
+  started_at: TimestampColumn;
+  finished_at: NullableTimestampColumn;
+  failure_code: NullableTextColumn;
+  failure_message: NullableTextColumn;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
+export interface JobLeasesTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  job_id: string;
+  attempt_id: string;
+  agent_id: string;
+  state: LeaseStateColumn;
+  acquired_at: TimestampColumn;
+  expires_at: TimestampColumn;
+  last_heartbeat_at: TimestampColumn;
+  released_at: NullableTimestampColumn;
+  expired_at: NullableTimestampColumn;
+  canceled_at: NullableTimestampColumn;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
 export interface HelixDatabase {
   _schema_migrations: SchemaMigrationsTable;
   tenants: TenantsTable;
@@ -247,6 +302,9 @@ export interface HelixDatabase {
   billing_stripe_customers: BillingStripeCustomersTable;
   billing_stripe_webhook_events: BillingStripeWebhookEventsTable;
   billing_usage_ledger: BillingUsageLedgerTable;
+  jobs: JobsTable;
+  job_attempts: JobAttemptsTable;
+  job_leases: JobLeasesTable;
   runtime_events: RuntimeEventsTable;
   runtime_outbox: RuntimeOutboxTable;
   runtime_inbox: RuntimeInboxTable;
