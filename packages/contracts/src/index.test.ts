@@ -46,6 +46,13 @@ import {
   stripeWebhookEventRecordSchema,
   usageLedgerRecordSchema,
   uuidV7Schema,
+  createWorkflowRequestSchema,
+  updateWorkflowDraftRequestSchema,
+  workflowDefinitionRecordSchema,
+  workflowResponseSchema,
+  workflowRunRecordSchema,
+  workflowVersionRecordSchema,
+  workflowVersionResponseSchema,
 } from '@helix/contracts';
 
 const validTenantId = '01890f42-98c4-7cc3-8a5e-0c567f1d3a77';
@@ -103,6 +110,72 @@ describe('base error contracts', () => {
     expect(() => errorEnvelopeSchema.parse({ error: { message: 'No code' } })).toThrow();
     expect(() => errorEnvelopeSchema.parse({ error: { code: '   ', message: 'Blank' } })).toThrow();
     expect(() => errorEnvelopeSchema.parse({ error: { code: 'EMPTY', message: '' } })).toThrow();
+  });
+});
+
+describe('workflow definition contracts', () => {
+  it('models drafts, immutable published versions, and runs pinned to a version', () => {
+    const workflow = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3c20',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      slug: 'invoice-approval',
+      name: 'Invoice Approval',
+      description: 'Approves invoices',
+      draftGraph: { nodes: [{ id: 'review' }], edges: [] },
+      metadata: { owner: 'ops' },
+      createdAt: '2026-05-15T13:00:00.000Z',
+      updatedAt: '2026-05-15T13:01:00.000Z',
+    };
+    const version = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3c21',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      workflowId: workflow.id,
+      versionNumber: 1,
+      graph: workflow.draftGraph,
+      metadata: workflow.metadata,
+      publishedAt: '2026-05-15T13:02:00.000Z',
+      createdAt: '2026-05-15T13:02:00.000Z',
+    };
+    const run = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3c22',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      workflowId: workflow.id,
+      workflowVersionId: version.id,
+      state: 'queued',
+      idempotencyKey: 'workflow-run:invoice-1',
+      createdAt: '2026-05-15T13:03:00.000Z',
+      updatedAt: '2026-05-15T13:03:00.000Z',
+    };
+
+    expect(createWorkflowRequestSchema.parse({
+      slug: workflow.slug,
+      name: workflow.name,
+      description: workflow.description,
+      draftGraph: workflow.draftGraph,
+      metadata: workflow.metadata,
+    })).toEqual({
+      slug: workflow.slug,
+      name: workflow.name,
+      description: workflow.description,
+      draftGraph: workflow.draftGraph,
+      metadata: workflow.metadata,
+    });
+    expect(updateWorkflowDraftRequestSchema.parse({ draftGraph: { nodes: [] } })).toEqual({
+      draftGraph: { nodes: [] },
+    });
+    expect(workflowDefinitionRecordSchema.parse(workflow)).toEqual(workflow);
+    expect(workflowVersionRecordSchema.parse(version)).toEqual(version);
+    expect(workflowRunRecordSchema.parse(run)).toEqual(run);
+    expect(workflowResponseSchema.parse({ workflow })).toEqual({ workflow });
+    expect(workflowVersionResponseSchema.parse({ version })).toEqual({ version });
+    expect(permissionCatalog).toContain('workflows:publish');
+    expect(() => updateWorkflowDraftRequestSchema.parse({})).toThrow();
+    expect(() => workflowVersionRecordSchema.parse({ ...version, versionNumber: 0 })).toThrow();
+    expect(() => workflowVersionRecordSchema.parse({ ...version, graph: [] })).toThrow();
+    expect(() => workflowDefinitionRecordSchema.parse({ ...workflow, unexpected: true })).toThrow();
   });
 });
 

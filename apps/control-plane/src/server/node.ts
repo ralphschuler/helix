@@ -11,6 +11,7 @@ import {
 } from '../features/iam/project-api-keys.js';
 import type { SecurityAuditSink } from '../features/iam/security-audit.js';
 import { KyselyJobRepository, JobService } from '../features/jobs/job-service.js';
+import { KyselyWorkflowRepository, WorkflowService } from '../features/workflows/workflow-service.js';
 import {
   createApiAuthProvider,
   createApp,
@@ -49,6 +50,7 @@ function createDefaultAppOptions(): CreateAppOptions {
       agentTokenAuthenticator: agentAuthService,
     }),
     jobService: new JobService({ repository: new KyselyJobRepository(db) }),
+    workflowService: new WorkflowService({ repository: new KyselyWorkflowRepository(db) }),
   };
 }
 
