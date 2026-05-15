@@ -137,6 +137,28 @@ export const createJobRequestSchema = z
   })
   .strict();
 
+const leaseTtlSecondsSchema = z.number().int().positive().max(86_400);
+
+export const claimJobRequestSchema = z
+  .object({
+    leaseTtlSeconds: leaseTtlSecondsSchema.optional(),
+  })
+  .strict();
+
+export const heartbeatLeaseRequestSchema = z
+  .object({
+    leaseTtlSeconds: leaseTtlSecondsSchema.optional(),
+  })
+  .strict();
+
+export const claimedJobSchema = z
+  .object({
+    job: jobRecordSchema,
+    attempt: jobAttemptRecordSchema,
+    lease: jobLeaseRecordSchema,
+  })
+  .strict();
+
 export const jobResponseSchema = z
   .object({
     job: jobRecordSchema,
@@ -147,6 +169,18 @@ export const jobResponseSchema = z
 export const jobListResponseSchema = z
   .object({
     jobs: z.array(jobRecordSchema),
+  })
+  .strict();
+
+export const claimJobResponseSchema = z
+  .object({
+    claim: claimedJobSchema.nullable(),
+  })
+  .strict();
+
+export const heartbeatLeaseResponseSchema = z
+  .object({
+    lease: jobLeaseRecordSchema,
   })
   .strict();
 
@@ -173,7 +207,12 @@ export type JobRecord = z.infer<typeof jobRecordSchema>;
 export type JobAttemptRecord = z.infer<typeof jobAttemptRecordSchema>;
 export type JobLeaseRecord = z.infer<typeof jobLeaseRecordSchema>;
 export type CreateJobRequest = z.infer<typeof createJobRequestSchema>;
+export type ClaimJobRequest = z.infer<typeof claimJobRequestSchema>;
+export type HeartbeatLeaseRequest = z.infer<typeof heartbeatLeaseRequestSchema>;
+export type ClaimedJob = z.infer<typeof claimedJobSchema>;
 export type JobResponse = z.infer<typeof jobResponseSchema>;
 export type JobListResponse = z.infer<typeof jobListResponseSchema>;
+export type ClaimJobResponse = z.infer<typeof claimJobResponseSchema>;
+export type HeartbeatLeaseResponse = z.infer<typeof heartbeatLeaseResponseSchema>;
 export type JobCreatedEventPayload = z.infer<typeof jobCreatedEventPayloadSchema>;
 export type JobReadyEventPayload = z.infer<typeof jobReadyEventPayloadSchema>;

@@ -14,6 +14,7 @@ describe('broker job state machine guards', () => {
     expect(isLegalJobStateTransition({ from: 'queued', to: 'running' })).toBe(true);
     expect(isLegalJobStateTransition({ from: 'running', to: 'retrying' })).toBe(true);
     expect(isLegalJobStateTransition({ from: 'retrying', to: 'queued' })).toBe(true);
+    expect(isLegalJobStateTransition({ from: 'retrying', to: 'running' })).toBe(true);
     expect(isLegalJobStateTransition({ from: 'running', to: 'completed' })).toBe(true);
     expect(isLegalJobStateTransition({ from: 'completed', to: 'completed' })).toBe(false);
     expect(() =>

@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
 import type { Context, MiddlewareHandler } from 'hono';
 import {
+  claimJobRequestSchema,
   createJobRequestSchema,
+  heartbeatLeaseRequestSchema,
   idempotencyKeySchema,
   uuidV7Schema,
   type AuthContext,
@@ -32,7 +34,10 @@ import {
   type CustomRoleRecord,
 } from '../features/iam/custom-roles.js';
 import type { SecurityAuditSink } from '../features/iam/security-audit.js';
-import type { JobService } from '../features/jobs/job-service.js';
+import {
+  AgentClaimRequiredError,
+  type JobService,
+} from '../features/jobs/job-service.js';
 
 type AppEnvironment = {
   Variables: {
@@ -55,9 +60,14 @@ export interface ProjectApiKeyAuthenticator {
   authenticateProjectApiKey(token: string): Promise<AuthContext | null>;
 }
 
-export function createProjectApiKeyApiAuthProvider(
-  authenticator: ProjectApiKeyAuthenticator,
-): ApiAuthProvider {
+export interface AgentTokenAuthenticator {
+  authenticateAgentToken(token: string): Promise<AuthContext | null>;
+}
+
+export function createApiAuthProvider(input: {
+  readonly projectApiKeyAuthenticator?: ProjectApiKeyAuthenticator;
+  readonly agentTokenAuthenticator?: AgentTokenAuthenticator;
+}): ApiAuthProvider {
   return {
     async authenticate(request) {
       const token = getBearerToken(request.headers);
@@ -66,9 +76,22 @@ export function createProjectApiKeyApiAuthProvider(
         return null;
       }
 
-      return authenticator.authenticateProjectApiKey(token);
+      const projectAuth =
+        (await input.projectApiKeyAuthenticator?.authenticateProjectApiKey(token)) ?? null;
+
+      if (projectAuth !== null) {
+        return projectAuth;
+      }
+
+      return (await input.agentTokenAuthenticator?.authenticateAgentToken(token)) ?? null;
     },
   };
+}
+
+export function createProjectApiKeyApiAuthProvider(
+  authenticator: ProjectApiKeyAuthenticator,
+): ApiAuthProvider {
+  return createApiAuthProvider({ projectApiKeyAuthenticator: authenticator });
 }
 
 export interface CreateAppOptions {
@@ -181,6 +204,37 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     }
   });
 
+  app.post('/api/v1/jobs/claim', async (context) => {
+    if (jobService === undefined) {
+      return context.json({ error: 'job_service_not_configured' }, 503);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = claimJobRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_claim_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const claim = await jobService.claimReadyJob(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        request: request.data,
+      });
+
+      return context.json({ claim });
+    } catch (error) {
+      return handleJobApiError(context, error);
+    }
+  });
+
   app.get('/api/v1/jobs', async (context) => {
     if (jobService === undefined) {
       return context.json({ error: 'job_service_not_configured' }, 503);
@@ -194,6 +248,54 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
       });
 
       return context.json({ jobs });
+    } catch (error) {
+      return handleJobApiError(context, error);
+    }
+  });
+
+  app.post('/api/v1/jobs/:jobId/leases/:leaseId/heartbeat', async (context) => {
+    if (jobService === undefined) {
+      return context.json({ error: 'job_service_not_configured' }, 503);
+    }
+
+    const jobId = uuidV7Schema.safeParse(context.req.param('jobId'));
+    const leaseId = uuidV7Schema.safeParse(context.req.param('leaseId'));
+
+    if (!jobId.success) {
+      return context.json({ error: 'invalid_job_id' }, 400);
+    }
+
+    if (!leaseId.success) {
+      return context.json({ error: 'invalid_lease_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = heartbeatLeaseRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_heartbeat_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const lease = await jobService.heartbeatLease(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        jobId: jobId.data,
+        leaseId: leaseId.data,
+        request: request.data,
+      });
+
+      if (lease === null) {
+        return context.json({ error: 'lease_not_found' }, 404);
+      }
+
+      return context.json({ lease });
     } catch (error) {
       return handleJobApiError(context, error);
     }
@@ -594,6 +696,10 @@ function handleJobApiError(
 ): Response {
   if (error instanceof AuthorizationError) {
     return context.json({ error: error.reason }, 403);
+  }
+
+  if (error instanceof AgentClaimRequiredError) {
+    return context.json({ error: 'agent_token_required' }, 403);
   }
 
   if (error instanceof Error && error.message.includes('idempotencyKey')) {
