@@ -16,6 +16,7 @@ SaaS API, control-plane application, and v1 `/admin` UI shell.
 - Runtime outbox publisher service boundary for draining due events to Kafka/Redpanda-style producers with retry.
 - Runtime consumer inbox helpers for event-id dedupe, retryable failed processing, and tenant/project-scoped consumption records.
 - Project API key-authenticated job API for creating/listing/statusing tenant/project-scoped jobs with idempotent creation and runtime outbox events.
+- Retry/DLQ job behavior: exhausted failed attempts or expired leases transition jobs to `dead_lettered`, while attempt and lease history remains inspectable.
 
 ## Commands
 
@@ -49,6 +50,9 @@ curl http://localhost:3000/api/v1/jobs \
   -H 'Authorization: Bearer hpx_<prefix>.<secret>'
 
 curl http://localhost:3000/api/v1/jobs/<job-id> \
+  -H 'Authorization: Bearer hpx_<prefix>.<secret>'
+
+curl http://localhost:3000/api/v1/jobs/<job-id>/history \
   -H 'Authorization: Bearer hpx_<prefix>.<secret>'
 ```
 

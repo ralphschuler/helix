@@ -5,6 +5,7 @@ import {
   completeJobAttemptResponseSchema,
   failJobAttemptResponseSchema,
   heartbeatLeaseResponseSchema,
+  jobHistoryResponseSchema,
   jobListResponseSchema,
   jobResponseSchema,
 } from '@helix/contracts';
@@ -525,6 +526,412 @@ describe('job API', () => {
     );
   });
 
+  it('dead-letters a job after failed attempts exhaust maxAttempts and keeps retry history', async () => {
+    const repository = new InMemoryJobRepository();
+    const producerApp = createJobsApp(projectAuth, repository).app;
+    await producerApp.request('/api/v1/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+        'idempotency-key': 'create-job:dlq-fail-test',
+      },
+      body: JSON.stringify({ maxAttempts: 2, metadata: { source: 'dlq-fail-test' } }),
+    });
+    const firstClaimApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d81',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d82',
+      ],
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+    }).app;
+    const firstClaimResponse = await firstClaimApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ leaseTtlSeconds: 600 }),
+    });
+    const firstClaimBody = claimJobResponseSchema.parse(await firstClaimResponse.json());
+
+    if (firstClaimBody.claim === null) {
+      throw new Error('Expected first claim.');
+    }
+
+    const firstFailApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d83',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d84',
+      ],
+      now: () => new Date('2026-05-15T13:01:00.000Z'),
+    }).app;
+    const firstFailResponse = await firstFailApp.request(
+      `/api/v1/jobs/${firstClaimBody.claim.job.id}/attempts/${firstClaimBody.claim.attempt.id}/leases/${firstClaimBody.claim.lease.id}/fail`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer valid-project-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ failureCode: 'processor_error' }),
+      },
+    );
+
+    expect(failJobAttemptResponseSchema.parse(await firstFailResponse.json())).toMatchObject({
+      duplicate: false,
+      transition: {
+        job: {
+          id: firstClaimBody.claim.job.id,
+          state: 'retrying',
+          attemptCount: 1,
+          finishedAt: null,
+        },
+      },
+    });
+
+    const secondClaimApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d85',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d86',
+      ],
+      now: () => new Date('2026-05-15T13:02:00.000Z'),
+    }).app;
+    const secondClaimResponse = await secondClaimApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ leaseTtlSeconds: 600 }),
+    });
+    const secondClaimBody = claimJobResponseSchema.parse(await secondClaimResponse.json());
+
+    if (secondClaimBody.claim === null) {
+      throw new Error('Expected second claim.');
+    }
+
+    const secondFailApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d87',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d88',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d89',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d90',
+      ],
+      now: () => new Date('2026-05-15T13:03:00.000Z'),
+    }).app;
+    const finalFailPath = `/api/v1/jobs/${secondClaimBody.claim.job.id}/attempts/${secondClaimBody.claim.attempt.id}/leases/${secondClaimBody.claim.lease.id}/fail`;
+    const finalFailRequest = {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ failureCode: 'processor_error', failureMessage: 'GPU unavailable' }),
+    };
+
+    const finalFailResponse = await secondFailApp.request(finalFailPath, finalFailRequest);
+    const duplicateFinalFailResponse = await secondFailApp.request(finalFailPath, finalFailRequest);
+    const exhaustedClaimApp = createJobsApp(otherAgentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d91',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d92',
+      ],
+      now: () => new Date('2026-05-15T13:04:00.000Z'),
+    }).app;
+    const exhaustedClaimResponse = await exhaustedClaimApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ leaseTtlSeconds: 600 }),
+    });
+
+    expect(finalFailResponse.status).toBe(200);
+    expect(duplicateFinalFailResponse.status).toBe(200);
+    expect(failJobAttemptResponseSchema.parse(await finalFailResponse.json())).toMatchObject({
+      duplicate: false,
+      transition: {
+        job: {
+          id: firstClaimBody.claim.job.id,
+          state: 'dead_lettered',
+          attemptCount: 2,
+          finishedAt: '2026-05-15T13:03:00.000Z',
+        },
+        attempt: {
+          id: secondClaimBody.claim.attempt.id,
+          attemptNumber: 2,
+          state: 'failed',
+          finishedAt: '2026-05-15T13:03:00.000Z',
+          failureCode: 'processor_error',
+          failureMessage: 'GPU unavailable',
+        },
+        lease: {
+          id: secondClaimBody.claim.lease.id,
+          state: 'released',
+          releasedAt: '2026-05-15T13:03:00.000Z',
+        },
+      },
+    });
+    expect(failJobAttemptResponseSchema.parse(await duplicateFinalFailResponse.json())).toMatchObject({
+      duplicate: true,
+      transition: {
+        job: { id: firstClaimBody.claim.job.id, state: 'dead_lettered' },
+        attempt: { id: secondClaimBody.claim.attempt.id, state: 'failed' },
+        lease: { id: secondClaimBody.claim.lease.id, state: 'released' },
+      },
+    });
+    expect(claimJobResponseSchema.parse(await exhaustedClaimResponse.json())).toEqual({ claim: null });
+    expect(repository.attempts).toEqual([
+      expect.objectContaining({ id: firstClaimBody.claim.attempt.id, attemptNumber: 1, state: 'failed' }),
+      expect.objectContaining({ id: secondClaimBody.claim.attempt.id, attemptNumber: 2, state: 'failed' }),
+    ]);
+    expect(repository.leases).toEqual([
+      expect.objectContaining({ id: firstClaimBody.claim.lease.id, state: 'released' }),
+      expect.objectContaining({ id: secondClaimBody.claim.lease.id, state: 'released' }),
+    ]);
+    expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
+      'job.created',
+      'job.ready',
+      'job.attempt.failed',
+      'job.attempt.failed',
+    ]);
+
+    const historyResponse = await producerApp.request(
+      `/api/v1/jobs/${firstClaimBody.claim.job.id}/history`,
+      { headers: { authorization: 'Bearer valid-project-token' } },
+    );
+
+    expect(historyResponse.status).toBe(200);
+    expect(jobHistoryResponseSchema.parse(await historyResponse.json())).toMatchObject({
+      job: {
+        id: firstClaimBody.claim.job.id,
+        state: 'dead_lettered',
+        attemptCount: 2,
+      },
+      attempts: [
+        {
+          id: firstClaimBody.claim.attempt.id,
+          attemptNumber: 1,
+          state: 'failed',
+          finishedAt: '2026-05-15T13:01:00.000Z',
+          failureCode: 'processor_error',
+        },
+        {
+          id: secondClaimBody.claim.attempt.id,
+          attemptNumber: 2,
+          state: 'failed',
+          finishedAt: '2026-05-15T13:03:00.000Z',
+          failureCode: 'processor_error',
+        },
+      ],
+      leases: [
+        {
+          id: firstClaimBody.claim.lease.id,
+          attemptId: firstClaimBody.claim.attempt.id,
+          state: 'released',
+          releasedAt: '2026-05-15T13:01:00.000Z',
+        },
+        {
+          id: secondClaimBody.claim.lease.id,
+          attemptId: secondClaimBody.claim.attempt.id,
+          state: 'released',
+          releasedAt: '2026-05-15T13:03:00.000Z',
+        },
+      ],
+    });
+  });
+
+  it('keeps duplicate failure idempotency for existing terminal failed jobs', async () => {
+    const repository = new InMemoryJobRepository();
+    const failedAt = '2026-05-15T13:01:00.000Z';
+    const jobId = '01890f42-98c4-7cc3-aa5e-0c567f1d3e91';
+    const attemptId = '01890f42-98c4-7cc3-aa5e-0c567f1d3e92';
+    const leaseId = '01890f42-98c4-7cc3-aa5e-0c567f1d3e93';
+    repository.jobs.push({
+      id: jobId,
+      tenantId,
+      projectId,
+      state: 'failed',
+      priority: 0,
+      maxAttempts: 1,
+      attemptCount: 1,
+      readyAt: failedAt,
+      idempotencyKey: 'create-job:preexisting-failed-duplicate-test',
+      constraints: {},
+      metadata: { source: 'preexisting-failed-duplicate-test' },
+      createdAt: '2026-05-15T13:00:00.000Z',
+      updatedAt: failedAt,
+      finishedAt: failedAt,
+    });
+    repository.attempts.push({
+      id: attemptId,
+      tenantId,
+      projectId,
+      jobId,
+      attemptNumber: 1,
+      state: 'failed',
+      agentId,
+      startedAt: '2026-05-15T13:00:00.000Z',
+      finishedAt: failedAt,
+      failureCode: 'processor_error',
+      failureMessage: null,
+    });
+    repository.leases.push({
+      id: leaseId,
+      tenantId,
+      projectId,
+      jobId,
+      attemptId,
+      agentId,
+      state: 'released',
+      acquiredAt: '2026-05-15T13:00:00.000Z',
+      expiresAt: '2026-05-15T13:10:00.000Z',
+      lastHeartbeatAt: '2026-05-15T13:00:00.000Z',
+      releasedAt: failedAt,
+      expiredAt: null,
+      canceledAt: null,
+    });
+    const app = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e94',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e95',
+      ],
+      now: () => new Date('2026-05-15T13:02:00.000Z'),
+    }).app;
+
+    const response = await app.request(
+      `/api/v1/jobs/${jobId}/attempts/${attemptId}/leases/${leaseId}/fail`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer valid-project-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ failureCode: 'processor_error' }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(failJobAttemptResponseSchema.parse(await response.json())).toMatchObject({
+      duplicate: true,
+      transition: {
+        job: { id: jobId, state: 'failed' },
+        attempt: { id: attemptId, state: 'failed' },
+        lease: { id: leaseId, state: 'released' },
+      },
+    });
+    expect(repository.runtimeEvents).toHaveLength(0);
+    expect(repository.runtimeOutbox).toHaveLength(0);
+  });
+
+  it('rejects an old failed attempt after a newer retry claim owns the job', async () => {
+    const repository = new InMemoryJobRepository();
+    const producerApp = createJobsApp(projectAuth, repository).app;
+    await producerApp.request('/api/v1/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+        'idempotency-key': 'create-job:stale-failed-attempt-test',
+      },
+      body: JSON.stringify({ maxAttempts: 2, metadata: { source: 'stale-failed-attempt-test' } }),
+    });
+    const firstClaimApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e01',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e02',
+      ],
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+    }).app;
+    const firstClaimResponse = await firstClaimApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ leaseTtlSeconds: 600 }),
+    });
+    const firstClaimBody = claimJobResponseSchema.parse(await firstClaimResponse.json());
+
+    if (firstClaimBody.claim === null) {
+      throw new Error('Expected first claim.');
+    }
+
+    const firstFailApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e03',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e04',
+      ],
+      now: () => new Date('2026-05-15T13:01:00.000Z'),
+    }).app;
+    const firstFailPath = `/api/v1/jobs/${firstClaimBody.claim.job.id}/attempts/${firstClaimBody.claim.attempt.id}/leases/${firstClaimBody.claim.lease.id}/fail`;
+    await firstFailApp.request(firstFailPath, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ failureCode: 'processor_error' }),
+    });
+
+    const secondClaimApp = createJobsApp(otherAgentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e05',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e06',
+      ],
+      now: () => new Date('2026-05-15T13:02:00.000Z'),
+    }).app;
+    const secondClaimResponse = await secondClaimApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ leaseTtlSeconds: 600 }),
+    });
+    const secondClaimBody = claimJobResponseSchema.parse(await secondClaimResponse.json());
+
+    if (secondClaimBody.claim === null) {
+      throw new Error('Expected second claim.');
+    }
+
+    const staleFailApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e07',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e08',
+      ],
+      now: () => new Date('2026-05-15T13:03:00.000Z'),
+    }).app;
+    const staleFailResponse = await staleFailApp.request(firstFailPath, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ failureCode: 'processor_error' }),
+    });
+
+    expect(staleFailResponse.status).toBe(409);
+    expect(await staleFailResponse.json()).toEqual({ error: 'stale_attempt' });
+    expect(repository.jobs[0]).toMatchObject({
+      id: firstClaimBody.claim.job.id,
+      state: 'running',
+      attemptCount: 2,
+      finishedAt: null,
+    });
+    expect(repository.attempts).toEqual([
+      expect.objectContaining({ id: firstClaimBody.claim.attempt.id, state: 'failed' }),
+      expect.objectContaining({ id: secondClaimBody.claim.attempt.id, state: 'running' }),
+    ]);
+    expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
+      'job.created',
+      'job.ready',
+      'job.attempt.failed',
+    ]);
+  });
+
   it('rejects stale completion and failure after lease expiry and reclaim without mutating the newer attempt', async () => {
     const repository = new InMemoryJobRepository();
     const producerApp = createJobsApp(projectAuth, repository).app;
@@ -842,7 +1249,7 @@ describe('job API', () => {
     });
   });
 
-  it('terminates an expired lease instead of advertising an exhausted retry', async () => {
+  it('dead-letters an expired lease after maxAttempts instead of advertising an exhausted retry', async () => {
     const repository = new InMemoryJobRepository();
     const producerApp = createJobsApp(projectAuth, repository).app;
     await producerApp.request('/api/v1/jobs', {
@@ -899,9 +1306,19 @@ describe('job API', () => {
     expect(expired[0]).toMatchObject({
       job: {
         id: claimBody.claim.job.id,
-        state: 'failed',
+        state: 'dead_lettered',
         attemptCount: 1,
         finishedAt: '2026-05-15T13:02:00.000Z',
+      },
+      attempt: {
+        id: claimBody.claim.attempt.id,
+        state: 'expired',
+        finishedAt: '2026-05-15T13:02:00.000Z',
+      },
+      lease: {
+        id: claimBody.claim.lease.id,
+        state: 'expired',
+        expiredAt: '2026-05-15T13:02:00.000Z',
       },
     });
     expect(claimJobResponseSchema.parse(await reclaimResponse.json())).toEqual({ claim: null });

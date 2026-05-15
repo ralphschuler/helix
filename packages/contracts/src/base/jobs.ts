@@ -181,6 +181,14 @@ export const jobListResponseSchema = z
   })
   .strict();
 
+export const jobHistoryResponseSchema = z
+  .object({
+    job: jobRecordSchema,
+    attempts: z.array(jobAttemptRecordSchema),
+    leases: z.array(jobLeaseRecordSchema),
+  })
+  .strict();
+
 export const claimJobResponseSchema = z
   .object({
     claim: claimedJobSchema.nullable(),
@@ -259,6 +267,7 @@ export type FailJobAttemptRequest = z.infer<typeof failJobAttemptRequestSchema>;
 export type ClaimedJob = z.infer<typeof claimedJobSchema>;
 export type JobResponse = z.infer<typeof jobResponseSchema>;
 export type JobListResponse = z.infer<typeof jobListResponseSchema>;
+export type JobHistoryResponse = z.infer<typeof jobHistoryResponseSchema>;
 export type ClaimJobResponse = z.infer<typeof claimJobResponseSchema>;
 export type HeartbeatLeaseResponse = z.infer<typeof heartbeatLeaseResponseSchema>;
 export type CompleteJobAttemptResponse = z.infer<typeof completeJobAttemptResponseSchema>;
