@@ -25,11 +25,11 @@ const terminalAttemptStates = new Set<string>(['completed', 'failed', 'expired',
 
 const isoTimestampSchema = z.string().datetime({ offset: true });
 const nullableIsoTimestampSchema = isoTimestampSchema.nullable();
-const nullableNonBlankTextSchema = z
+const nonBlankTextSchema = z
   .string()
   .min(1)
-  .refine((value) => value.trim().length > 0, 'Expected non-blank text')
-  .nullable();
+  .refine((value) => value.trim().length > 0, 'Expected non-blank text');
+const nullableNonBlankTextSchema = nonBlankTextSchema.nullable();
 const metadataSchema = z.record(z.string(), z.unknown());
 
 export const jobRecordSchema = tenantProjectScopeSchema
@@ -151,6 +151,15 @@ export const heartbeatLeaseRequestSchema = z
   })
   .strict();
 
+export const completeJobAttemptRequestSchema = z.object({}).strict();
+
+export const failJobAttemptRequestSchema = z
+  .object({
+    failureCode: nonBlankTextSchema,
+    failureMessage: nonBlankTextSchema.optional(),
+  })
+  .strict();
+
 export const claimedJobSchema = z
   .object({
     job: jobRecordSchema,
@@ -184,6 +193,20 @@ export const heartbeatLeaseResponseSchema = z
   })
   .strict();
 
+export const completeJobAttemptResponseSchema = z
+  .object({
+    transition: claimedJobSchema,
+    duplicate: z.boolean(),
+  })
+  .strict();
+
+export const failJobAttemptResponseSchema = z
+  .object({
+    transition: claimedJobSchema,
+    duplicate: z.boolean(),
+  })
+  .strict();
+
 export const jobCreatedEventPayloadSchema = tenantProjectScopeSchema
   .extend({
     jobId: uuidV7Schema,
@@ -200,6 +223,28 @@ export const jobReadyEventPayloadSchema = tenantProjectScopeSchema
   })
   .strict();
 
+export const jobCompletedEventPayloadSchema = tenantProjectScopeSchema
+  .extend({
+    jobId: uuidV7Schema,
+    attemptId: uuidV7Schema,
+    leaseId: uuidV7Schema,
+    agentId: uuidV7Schema,
+    completedAt: isoTimestampSchema,
+  })
+  .strict();
+
+export const jobAttemptFailedEventPayloadSchema = tenantProjectScopeSchema
+  .extend({
+    jobId: uuidV7Schema,
+    attemptId: uuidV7Schema,
+    leaseId: uuidV7Schema,
+    agentId: uuidV7Schema,
+    failureCode: nonBlankTextSchema,
+    failureMessage: nullableNonBlankTextSchema,
+    failedAt: isoTimestampSchema,
+  })
+  .strict();
+
 export type JobState = z.infer<typeof jobStateSchema>;
 export type AttemptState = z.infer<typeof attemptStateSchema>;
 export type LeaseState = z.infer<typeof leaseStateSchema>;
@@ -209,10 +254,16 @@ export type JobLeaseRecord = z.infer<typeof jobLeaseRecordSchema>;
 export type CreateJobRequest = z.infer<typeof createJobRequestSchema>;
 export type ClaimJobRequest = z.infer<typeof claimJobRequestSchema>;
 export type HeartbeatLeaseRequest = z.infer<typeof heartbeatLeaseRequestSchema>;
+export type CompleteJobAttemptRequest = z.infer<typeof completeJobAttemptRequestSchema>;
+export type FailJobAttemptRequest = z.infer<typeof failJobAttemptRequestSchema>;
 export type ClaimedJob = z.infer<typeof claimedJobSchema>;
 export type JobResponse = z.infer<typeof jobResponseSchema>;
 export type JobListResponse = z.infer<typeof jobListResponseSchema>;
 export type ClaimJobResponse = z.infer<typeof claimJobResponseSchema>;
 export type HeartbeatLeaseResponse = z.infer<typeof heartbeatLeaseResponseSchema>;
+export type CompleteJobAttemptResponse = z.infer<typeof completeJobAttemptResponseSchema>;
+export type FailJobAttemptResponse = z.infer<typeof failJobAttemptResponseSchema>;
 export type JobCreatedEventPayload = z.infer<typeof jobCreatedEventPayloadSchema>;
 export type JobReadyEventPayload = z.infer<typeof jobReadyEventPayloadSchema>;
+export type JobCompletedEventPayload = z.infer<typeof jobCompletedEventPayloadSchema>;
+export type JobAttemptFailedEventPayload = z.infer<typeof jobAttemptFailedEventPayloadSchema>;

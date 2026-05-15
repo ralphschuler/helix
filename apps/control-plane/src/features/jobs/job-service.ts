@@ -4,6 +4,7 @@ import type {
   ClaimJobRequest,
   ClaimedJob as ClaimedJobRecord,
   CreateJobRequest,
+  FailJobAttemptRequest,
   HeartbeatLeaseRequest,
   JobAttemptRecord,
   JobLeaseRecord,
@@ -43,6 +44,19 @@ export interface HeartbeatLeaseInput extends TenantProjectScope {
   readonly request: HeartbeatLeaseRequest;
 }
 
+export interface CompleteJobAttemptInput extends TenantProjectScope {
+  readonly jobId: string;
+  readonly attemptId: string;
+  readonly leaseId: string;
+}
+
+export interface FailJobAttemptInput extends TenantProjectScope {
+  readonly jobId: string;
+  readonly attemptId: string;
+  readonly leaseId: string;
+  readonly request: FailJobAttemptRequest;
+}
+
 export interface ExpireLeasesInput extends TenantProjectScope {
   readonly limit?: number;
 }
@@ -56,6 +70,13 @@ export interface CreateJobResult {
 export type ClaimReadyJobResult = ClaimedJobRecord;
 export type HeartbeatLeaseResult = JobLeaseRecord;
 export type ExpiredLeaseResult = ClaimedJobRecord;
+
+export interface CompleteJobAttemptResult {
+  readonly transition: ClaimedJobRecord;
+  readonly duplicate: boolean;
+}
+
+export type FailJobAttemptResult = CompleteJobAttemptResult;
 
 export interface JobRepositoryCreateInput {
   readonly job: JobRecord;
@@ -84,6 +105,30 @@ export interface JobRepositoryHeartbeatInput extends TenantProjectScope {
   readonly leaseExpiresAt: Date;
 }
 
+export interface JobRepositoryCompleteAttemptInput extends TenantProjectScope {
+  readonly jobId: string;
+  readonly attemptId: string;
+  readonly leaseId: string;
+  readonly agentId: string;
+  readonly now: Date;
+  readonly events: readonly RuntimeEventRecord[];
+  readonly outbox: readonly RuntimeOutboxRecord[];
+}
+
+export interface JobRepositoryFailAttemptInput extends JobRepositoryCompleteAttemptInput {
+  readonly failureCode: string;
+  readonly failureMessage: string | null;
+}
+
+export type JobRepositoryTerminalAttemptResult =
+  | { readonly status: 'applied'; readonly transition: ClaimedJobRecord }
+  | { readonly status: 'duplicate'; readonly transition: ClaimedJobRecord }
+  | { readonly status: 'not_found' }
+  | { readonly status: 'stale' };
+
+export type JobRepositoryCompleteAttemptResult = JobRepositoryTerminalAttemptResult;
+export type JobRepositoryFailAttemptResult = JobRepositoryTerminalAttemptResult;
+
 export interface JobRepositoryExpireLeasesInput extends TenantProjectScope {
   readonly now: Date;
   readonly limit: number;
@@ -100,6 +145,10 @@ export interface JobRepository {
   listJobs(input: TenantProjectScope): Promise<JobRecord[]>;
   claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null>;
   heartbeatLease(input: JobRepositoryHeartbeatInput): Promise<JobLeaseRecord | null>;
+  completeJobAttempt(
+    input: JobRepositoryCompleteAttemptInput,
+  ): Promise<JobRepositoryCompleteAttemptResult>;
+  failJobAttempt(input: JobRepositoryFailAttemptInput): Promise<JobRepositoryFailAttemptResult>;
   expireLeases(input: JobRepositoryExpireLeasesInput): Promise<ExpiredLeaseResult[]>;
 }
 
@@ -111,8 +160,15 @@ export interface JobServiceOptions {
 
 export class AgentClaimRequiredError extends Error {
   constructor() {
-    super('Agent-token authentication is required to claim or heartbeat jobs.');
+    super('Agent-token authentication is required to claim, heartbeat, complete, or fail jobs.');
     this.name = 'AgentClaimRequiredError';
+  }
+}
+
+export class StaleJobAttemptError extends Error {
+  constructor() {
+    super('Job attempt is stale and cannot mutate terminal job state.');
+    this.name = 'StaleJobAttemptError';
   }
 }
 
@@ -232,6 +288,109 @@ export class JobService {
     });
   }
 
+  async completeJobAttempt(
+    authContext: AuthContext,
+    input: CompleteJobAttemptInput,
+  ): Promise<CompleteJobAttemptResult | null> {
+    assertProjectPermission(authContext, input, 'agents:claim');
+    const timestamp = this.now();
+    const agentId = getAgentIdForClaim(authContext);
+    const event = this.createRuntimeEvent({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: input.jobId,
+      eventType: 'job.completed',
+      payload: {
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        jobId: input.jobId,
+        attemptId: input.attemptId,
+        leaseId: input.leaseId,
+        agentId,
+        completedAt: timestamp.toISOString(),
+      },
+      timestamp,
+    });
+    const result = await this.repository.completeJobAttempt({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      leaseId: input.leaseId,
+      agentId,
+      now: timestamp,
+      events: [event],
+      outbox: [this.createRuntimeOutbox(event, timestamp)],
+    });
+
+    if (result.status === 'not_found') {
+      return null;
+    }
+
+    if (result.status === 'stale') {
+      throw new StaleJobAttemptError();
+    }
+
+    return {
+      transition: result.transition,
+      duplicate: result.status === 'duplicate',
+    };
+  }
+
+  async failJobAttempt(
+    authContext: AuthContext,
+    input: FailJobAttemptInput,
+  ): Promise<FailJobAttemptResult | null> {
+    assertProjectPermission(authContext, input, 'agents:claim');
+    const timestamp = this.now();
+    const agentId = getAgentIdForClaim(authContext);
+    const failureMessage = input.request.failureMessage ?? null;
+    const event = this.createRuntimeEvent({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: input.jobId,
+      eventType: 'job.attempt.failed',
+      payload: {
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        jobId: input.jobId,
+        attemptId: input.attemptId,
+        leaseId: input.leaseId,
+        agentId,
+        failureCode: input.request.failureCode,
+        failureMessage,
+        failedAt: timestamp.toISOString(),
+      },
+      timestamp,
+    });
+    const result = await this.repository.failJobAttempt({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      leaseId: input.leaseId,
+      agentId,
+      now: timestamp,
+      failureCode: input.request.failureCode,
+      failureMessage,
+      events: [event],
+      outbox: [this.createRuntimeOutbox(event, timestamp)],
+    });
+
+    if (result.status === 'not_found') {
+      return null;
+    }
+
+    if (result.status === 'stale') {
+      throw new StaleJobAttemptError();
+    }
+
+    return {
+      transition: result.transition,
+      duplicate: result.status === 'duplicate',
+    };
+  }
+
   async expireLeases(input: ExpireLeasesInput): Promise<ExpiredLeaseResult[]> {
     const timestamp = this.now();
 
@@ -247,7 +406,9 @@ export class JobService {
     const events: RuntimeEventRecord[] = [
       this.createRuntimeEvent({
         eventType: 'job.created',
-        job,
+        tenantId: job.tenantId,
+        projectId: job.projectId,
+        jobId: job.id,
         payload: {
           tenantId: job.tenantId,
           projectId: job.projectId,
@@ -264,7 +425,9 @@ export class JobService {
       events.push(
         this.createRuntimeEvent({
           eventType: 'job.ready',
-          job,
+          tenantId: job.tenantId,
+          projectId: job.projectId,
+          jobId: job.id,
           payload: {
             tenantId: job.tenantId,
             projectId: job.projectId,
@@ -281,17 +444,19 @@ export class JobService {
 
   private createRuntimeEvent(input: {
     readonly eventType: string;
-    readonly job: JobRecord;
+    readonly tenantId: string;
+    readonly projectId: string;
+    readonly jobId: string;
     readonly payload: Record<string, unknown>;
     readonly timestamp: Date;
   }): RuntimeEventRecord {
     return {
       id: this.generateId(),
-      tenantId: input.job.tenantId,
-      projectId: input.job.projectId,
+      tenantId: input.tenantId,
+      projectId: input.projectId,
       eventType: input.eventType,
       eventVersion: 1,
-      orderingKey: `project:${input.job.projectId}:job:${input.job.id}`,
+      orderingKey: `project:${input.projectId}:job:${input.jobId}`,
       payload: input.payload,
       occurredAt: input.timestamp,
       recordedAt: input.timestamp,
@@ -464,6 +629,104 @@ export class InMemoryJobRepository implements JobRepository {
     return updatedLease;
   }
 
+  async completeJobAttempt(
+    input: JobRepositoryCompleteAttemptInput,
+  ): Promise<JobRepositoryCompleteAttemptResult> {
+    const records = this.findAttemptTransitionRecords(input);
+
+    if (records === null) {
+      return { status: 'not_found' };
+    }
+
+    if (isCompleteDuplicate(records)) {
+      return { status: 'duplicate', transition: records };
+    }
+
+    if (!canFinishRunningAttempt(records, input.now)) {
+      return { status: 'stale' };
+    }
+
+    const timestamp = input.now.toISOString();
+    const updatedLease: JobLeaseRecord = {
+      ...records.lease,
+      state: 'released',
+      releasedAt: timestamp,
+    };
+    const updatedAttempt: JobAttemptRecord = {
+      ...records.attempt,
+      state: 'completed',
+      finishedAt: timestamp,
+    };
+    const updatedJob: JobRecord = {
+      ...records.job,
+      state: 'completed',
+      updatedAt: timestamp,
+      finishedAt: timestamp,
+    };
+
+    this.replaceLease(updatedLease);
+    this.replaceAttempt(updatedAttempt);
+    this.replaceJob(updatedJob);
+    this.runtimeEvents.push(...input.events);
+    this.runtimeOutbox.push(...input.outbox);
+
+    return {
+      status: 'applied',
+      transition: { job: updatedJob, attempt: updatedAttempt, lease: updatedLease },
+    };
+  }
+
+  async failJobAttempt(
+    input: JobRepositoryFailAttemptInput,
+  ): Promise<JobRepositoryFailAttemptResult> {
+    const records = this.findAttemptTransitionRecords(input);
+
+    if (records === null) {
+      return { status: 'not_found' };
+    }
+
+    if (isFailDuplicate(records)) {
+      return { status: 'duplicate', transition: records };
+    }
+
+    if (!canFinishRunningAttempt(records, input.now)) {
+      return { status: 'stale' };
+    }
+
+    const timestamp = input.now.toISOString();
+    const exhaustedAttempts = records.job.attemptCount >= records.job.maxAttempts;
+    const updatedLease: JobLeaseRecord = {
+      ...records.lease,
+      state: 'released',
+      releasedAt: timestamp,
+    };
+    const updatedAttempt: JobAttemptRecord = {
+      ...records.attempt,
+      state: 'failed',
+      finishedAt: timestamp,
+      failureCode: input.failureCode,
+      failureMessage: input.failureMessage,
+    };
+    const updatedJob: JobRecord = {
+      ...records.job,
+      state: exhaustedAttempts ? 'failed' : 'retrying',
+      readyAt: timestamp,
+      updatedAt: timestamp,
+      finishedAt: exhaustedAttempts ? timestamp : null,
+    };
+
+    this.replaceLease(updatedLease);
+    this.replaceAttempt(updatedAttempt);
+    this.replaceJob(updatedJob);
+    this.runtimeEvents.push(...input.events);
+    this.runtimeOutbox.push(...input.outbox);
+
+    return {
+      status: 'applied',
+      transition: { job: updatedJob, attempt: updatedAttempt, lease: updatedLease },
+    };
+  }
+
   async expireLeases(input: JobRepositoryExpireLeasesInput): Promise<ExpiredLeaseResult[]> {
     const expired: ExpiredLeaseResult[] = [];
     const activeExpiredLeases = this.leases
@@ -524,6 +787,44 @@ export class InMemoryJobRepository implements JobRepository {
     }
 
     return expired;
+  }
+
+  private findAttemptTransitionRecords(
+    input: JobRepositoryCompleteAttemptInput,
+  ): ClaimedJobRecord | null {
+    const lease = this.leases.find(
+      (candidate) =>
+        candidate.tenantId === input.tenantId &&
+        candidate.projectId === input.projectId &&
+        candidate.jobId === input.jobId &&
+        candidate.attemptId === input.attemptId &&
+        candidate.id === input.leaseId &&
+        candidate.agentId === input.agentId,
+    );
+
+    if (lease === undefined) {
+      return null;
+    }
+
+    const attempt = this.attempts.find(
+      (candidate) =>
+        candidate.tenantId === input.tenantId &&
+        candidate.projectId === input.projectId &&
+        candidate.jobId === input.jobId &&
+        candidate.id === input.attemptId,
+    );
+    const job = this.jobs.find(
+      (candidate) =>
+        candidate.tenantId === input.tenantId &&
+        candidate.projectId === input.projectId &&
+        candidate.id === input.jobId,
+    );
+
+    if (attempt === undefined || job === undefined) {
+      return null;
+    }
+
+    return { job, attempt, lease };
   }
 
   private hasActiveLease(job: JobRecord): boolean {
@@ -796,6 +1097,240 @@ export class KyselyJobRepository implements JobRepository {
     });
   }
 
+  async completeJobAttempt(
+    input: JobRepositoryCompleteAttemptInput,
+  ): Promise<JobRepositoryCompleteAttemptResult> {
+    return this.db.transaction().execute(async (transaction) => {
+      const lease = await transaction
+        .selectFrom('job_leases')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('job_id', '=', input.jobId)
+        .where('attempt_id', '=', input.attemptId)
+        .where('id', '=', input.leaseId)
+        .where('agent_id', '=', input.agentId)
+        .forUpdate()
+        .executeTakeFirst();
+
+      if (lease === undefined) {
+        return { status: 'not_found' };
+      }
+
+      const attempt = await transaction
+        .selectFrom('job_attempts')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('job_id', '=', input.jobId)
+        .where('id', '=', input.attemptId)
+        .forUpdate()
+        .executeTakeFirst();
+      const job = await transaction
+        .selectFrom('jobs')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.jobId)
+        .forUpdate()
+        .executeTakeFirst();
+
+      if (attempt === undefined || job === undefined) {
+        return { status: 'not_found' };
+      }
+
+      const records = {
+        job: toJobRecord(job),
+        attempt: toJobAttemptRecord(attempt),
+        lease: toJobLeaseRecord(lease),
+      };
+
+      if (isCompleteDuplicate(records)) {
+        return { status: 'duplicate', transition: records };
+      }
+
+      if (!canFinishRunningAttempt(records, input.now)) {
+        return { status: 'stale' };
+      }
+
+      const updatedLease = await transaction
+        .updateTable('job_leases')
+        .set({
+          state: 'released',
+          released_at: input.now,
+          updated_at: input.now,
+        })
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.leaseId)
+        .where('state', '=', 'active')
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const updatedAttempt = await transaction
+        .updateTable('job_attempts')
+        .set({
+          state: 'completed',
+          finished_at: input.now,
+          updated_at: input.now,
+        })
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.attemptId)
+        .where('state', '=', 'running')
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const updatedJob = await transaction
+        .updateTable('jobs')
+        .set({
+          state: 'completed',
+          updated_at: input.now,
+          finished_at: input.now,
+        })
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.jobId)
+        .where('state', '=', 'running')
+        .returningAll()
+        .executeTakeFirstOrThrow();
+
+      for (const event of input.events) {
+        await transaction.insertInto('runtime_events').values(toRuntimeEventRow(event)).execute();
+      }
+
+      for (const outbox of input.outbox) {
+        await transaction.insertInto('runtime_outbox').values(toRuntimeOutboxRow(outbox)).execute();
+      }
+
+      return {
+        status: 'applied',
+        transition: {
+          job: toJobRecord(updatedJob),
+          attempt: toJobAttemptRecord(updatedAttempt),
+          lease: toJobLeaseRecord(updatedLease),
+        },
+      };
+    });
+  }
+
+  async failJobAttempt(
+    input: JobRepositoryFailAttemptInput,
+  ): Promise<JobRepositoryFailAttemptResult> {
+    return this.db.transaction().execute(async (transaction) => {
+      const lease = await transaction
+        .selectFrom('job_leases')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('job_id', '=', input.jobId)
+        .where('attempt_id', '=', input.attemptId)
+        .where('id', '=', input.leaseId)
+        .where('agent_id', '=', input.agentId)
+        .forUpdate()
+        .executeTakeFirst();
+
+      if (lease === undefined) {
+        return { status: 'not_found' };
+      }
+
+      const attempt = await transaction
+        .selectFrom('job_attempts')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('job_id', '=', input.jobId)
+        .where('id', '=', input.attemptId)
+        .forUpdate()
+        .executeTakeFirst();
+      const job = await transaction
+        .selectFrom('jobs')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.jobId)
+        .forUpdate()
+        .executeTakeFirst();
+
+      if (attempt === undefined || job === undefined) {
+        return { status: 'not_found' };
+      }
+
+      const records = {
+        job: toJobRecord(job),
+        attempt: toJobAttemptRecord(attempt),
+        lease: toJobLeaseRecord(lease),
+      };
+
+      if (isFailDuplicate(records)) {
+        return { status: 'duplicate', transition: records };
+      }
+
+      if (!canFinishRunningAttempt(records, input.now)) {
+        return { status: 'stale' };
+      }
+
+      const exhaustedAttempts = records.job.attemptCount >= records.job.maxAttempts;
+      const updatedLease = await transaction
+        .updateTable('job_leases')
+        .set({
+          state: 'released',
+          released_at: input.now,
+          updated_at: input.now,
+        })
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.leaseId)
+        .where('state', '=', 'active')
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const updatedAttempt = await transaction
+        .updateTable('job_attempts')
+        .set({
+          state: 'failed',
+          finished_at: input.now,
+          failure_code: input.failureCode,
+          failure_message: input.failureMessage,
+          updated_at: input.now,
+        })
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.attemptId)
+        .where('state', '=', 'running')
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const updatedJob = await transaction
+        .updateTable('jobs')
+        .set({
+          state: exhaustedAttempts ? 'failed' : 'retrying',
+          ready_at: input.now,
+          updated_at: input.now,
+          finished_at: exhaustedAttempts ? input.now : null,
+        })
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.jobId)
+        .where('state', '=', 'running')
+        .returningAll()
+        .executeTakeFirstOrThrow();
+
+      for (const event of input.events) {
+        await transaction.insertInto('runtime_events').values(toRuntimeEventRow(event)).execute();
+      }
+
+      for (const outbox of input.outbox) {
+        await transaction.insertInto('runtime_outbox').values(toRuntimeOutboxRow(outbox)).execute();
+      }
+
+      return {
+        status: 'applied',
+        transition: {
+          job: toJobRecord(updatedJob),
+          attempt: toJobAttemptRecord(updatedAttempt),
+          lease: toJobLeaseRecord(updatedLease),
+        },
+      };
+    });
+  }
+
   async expireLeases(input: JobRepositoryExpireLeasesInput): Promise<ExpiredLeaseResult[]> {
     return this.db.transaction().execute(async (transaction) => {
       const leases = await transaction
@@ -960,6 +1495,27 @@ function compareClaimableJobs(left: JobRecord, right: JobRecord): number {
   }
 
   return Date.parse(left.createdAt) - Date.parse(right.createdAt);
+}
+
+function isCompleteDuplicate(records: ClaimedJobRecord): boolean {
+  return (
+    records.job.state === 'completed' &&
+    records.attempt.state === 'completed' &&
+    records.lease.state === 'released'
+  );
+}
+
+function canFinishRunningAttempt(records: ClaimedJobRecord, now: Date): boolean {
+  return (
+    records.job.state === 'running' &&
+    records.attempt.state === 'running' &&
+    records.lease.state === 'active' &&
+    Date.parse(records.lease.expiresAt) > now.getTime()
+  );
+}
+
+function isFailDuplicate(records: ClaimedJobRecord): boolean {
+  return records.attempt.state === 'failed' && records.lease.state === 'released';
 }
 
 function toJobRow(job: JobRecord) {
