@@ -58,7 +58,10 @@ import {
   updateWorkflowDraftRequestSchema,
   workflowDefinitionRecordSchema,
   workflowResponseSchema,
+  workflowRunListResponseSchema,
   workflowRunRecordSchema,
+  workflowRunResponseSchema,
+  workflowRunStartedEventPayloadSchema,
   workflowVersionRecordSchema,
   workflowVersionResponseSchema,
 } from '@helix/contracts';
@@ -179,6 +182,27 @@ describe('workflow definition contracts', () => {
     expect(workflowRunRecordSchema.parse(run)).toEqual(run);
     expect(workflowResponseSchema.parse({ workflow })).toEqual({ workflow });
     expect(workflowVersionResponseSchema.parse({ version })).toEqual({ version });
+    expect(workflowRunResponseSchema.parse({ run })).toEqual({ run });
+    expect(workflowRunListResponseSchema.parse({ runs: [run] })).toEqual({ runs: [run] });
+    expect(workflowRunStartedEventPayloadSchema.parse({
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      workflowId: workflow.id,
+      workflowVersionId: version.id,
+      runId: run.id,
+      state: 'queued',
+      idempotencyKey: run.idempotencyKey,
+      startedAt: run.createdAt,
+    })).toEqual({
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      workflowId: workflow.id,
+      workflowVersionId: version.id,
+      runId: run.id,
+      state: 'queued',
+      idempotencyKey: run.idempotencyKey,
+      startedAt: run.createdAt,
+    });
     expect(permissionCatalog).toContain('workflows:publish');
     expect(() => updateWorkflowDraftRequestSchema.parse({})).toThrow();
     expect(() => workflowVersionRecordSchema.parse({ ...version, versionNumber: 0 })).toThrow();

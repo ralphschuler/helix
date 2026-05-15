@@ -101,6 +101,23 @@ export const workflowRunResponseSchema = z
   })
   .strict();
 
+export const workflowRunListResponseSchema = z
+  .object({
+    runs: z.array(workflowRunRecordSchema),
+  })
+  .strict();
+
+export const workflowRunStartedEventPayloadSchema = tenantProjectScopeSchema
+  .extend({
+    workflowId: uuidV7Schema,
+    workflowVersionId: uuidV7Schema,
+    runId: uuidV7Schema,
+    state: z.literal('queued'),
+    idempotencyKey: idempotencyKeySchema,
+    startedAt: isoTimestampSchema,
+  })
+  .strict();
+
 export type WorkflowDefinitionRecord = z.infer<typeof workflowDefinitionRecordSchema>;
 export type WorkflowVersionRecord = z.infer<typeof workflowVersionRecordSchema>;
 export type WorkflowRunRecord = z.infer<typeof workflowRunRecordSchema>;
@@ -108,3 +125,4 @@ export type CreateWorkflowRequest = z.infer<typeof createWorkflowRequestSchema>;
 export type UpdateWorkflowDraftRequest = z.infer<typeof updateWorkflowDraftRequestSchema>;
 export type PublishWorkflowRequest = z.infer<typeof publishWorkflowRequestSchema>;
 export type StartWorkflowRunRequest = z.infer<typeof startWorkflowRunRequestSchema>;
+export type WorkflowRunStartedEventPayload = z.infer<typeof workflowRunStartedEventPayloadSchema>;

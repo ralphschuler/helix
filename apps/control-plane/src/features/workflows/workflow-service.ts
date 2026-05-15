@@ -13,6 +13,12 @@ import type {
 import type { HelixDatabase } from '../../db/schema.js';
 import { assertProjectPermission } from '../iam/authorization.js';
 import { randomUuidV7LikeId } from '../iam/token-secrets.js';
+import type {
+  RuntimeEventRecord,
+  RuntimeOutboxRecord,
+} from '../runtime/transactional-outbox.js';
+
+const runtimeEventTopic = 'helix.runtime.events';
 
 export interface WorkflowRepositoryCreateInput {
   readonly workflow: WorkflowDefinitionRecord;
@@ -30,6 +36,8 @@ export interface WorkflowRepositoryPublishInput {
 
 export interface WorkflowRepositoryStartRunInput {
   readonly run: WorkflowRunRecord;
+  readonly events: readonly RuntimeEventRecord[];
+  readonly outbox: readonly RuntimeOutboxRecord[];
 }
 
 export interface WorkflowRepository {
@@ -41,6 +49,8 @@ export interface WorkflowRepository {
   findVersion(input: TenantProjectScope & { readonly workflowVersionId: string }): Promise<WorkflowVersionRecord | null>;
   nextVersionNumber(input: TenantProjectScope & { readonly workflowId: string }): Promise<number>;
   publishVersion(input: WorkflowRepositoryPublishInput): Promise<WorkflowVersionRecord>;
+  findRun(input: TenantProjectScope & { readonly workflowId: string; readonly runId: string }): Promise<WorkflowRunRecord | null>;
+  listRuns(input: TenantProjectScope & { readonly workflowId: string }): Promise<WorkflowRunRecord[]>;
   findRunByIdempotencyKey(input: TenantProjectScope & { readonly workflowId: string; readonly idempotencyKey: string }): Promise<WorkflowRunRecord | null>;
   createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord>;
 }
@@ -164,6 +174,24 @@ export class WorkflowService {
     return this.repository.publishVersion({ version });
   }
 
+  async getRun(
+    authContext: AuthContext,
+    input: TenantProjectScope & { readonly workflowId: string; readonly runId: string },
+  ): Promise<WorkflowRunRecord | null> {
+    assertProjectPermission(authContext, input, 'workflows:read');
+
+    return this.repository.findRun(input);
+  }
+
+  async listRuns(
+    authContext: AuthContext,
+    input: TenantProjectScope & { readonly workflowId: string },
+  ): Promise<WorkflowRunRecord[]> {
+    assertProjectPermission(authContext, input, 'workflows:read');
+
+    return this.repository.listRuns(input);
+  }
+
   async startRun(
     authContext: AuthContext,
     input: TenantProjectScope & {
@@ -215,8 +243,11 @@ export class WorkflowService {
       updatedAt: timestamp,
     };
 
+    const events = [this.createRunStartedEvent(run, timestamp)];
+    const outbox = events.map((event) => this.createRuntimeOutbox(event, new Date(timestamp)));
+
     try {
-      return { run: await this.repository.createRun({ run }), created: true };
+      return { run: await this.repository.createRun({ run, events, outbox }), created: true };
     } catch (error) {
       const existingAfterRace = await this.repository.findRunByIdempotencyKey(input);
 
@@ -231,12 +262,60 @@ export class WorkflowService {
       throw error;
     }
   }
+
+  private createRunStartedEvent(run: WorkflowRunRecord, timestamp: string): RuntimeEventRecord {
+    const occurredAt = new Date(timestamp);
+
+    return {
+      id: randomUuidV7LikeId(occurredAt),
+      tenantId: run.tenantId,
+      projectId: run.projectId,
+      eventType: 'workflow.run.started',
+      eventVersion: 1,
+      orderingKey: `project:${run.projectId}:workflow:${run.workflowId}:run:${run.id}`,
+      payload: {
+        tenantId: run.tenantId,
+        projectId: run.projectId,
+        workflowId: run.workflowId,
+        workflowVersionId: run.workflowVersionId,
+        runId: run.id,
+        state: run.state,
+        idempotencyKey: run.idempotencyKey,
+        startedAt: timestamp,
+      },
+      occurredAt,
+      recordedAt: occurredAt,
+    };
+  }
+
+  private createRuntimeOutbox(
+    event: RuntimeEventRecord,
+    timestamp: Date,
+  ): RuntimeOutboxRecord {
+    return {
+      id: randomUuidV7LikeId(timestamp),
+      tenantId: event.tenantId,
+      projectId: event.projectId,
+      eventId: event.id,
+      topic: runtimeEventTopic,
+      partitionKey: event.orderingKey,
+      status: 'pending',
+      publishAttempts: 0,
+      nextAttemptAt: timestamp,
+      publishedAt: null,
+      lastError: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+  }
 }
 
 export class InMemoryWorkflowRepository implements WorkflowRepository {
   readonly workflows: WorkflowDefinitionRecord[] = [];
   readonly versions: WorkflowVersionRecord[] = [];
   readonly runs: WorkflowRunRecord[] = [];
+  readonly runtimeEvents: RuntimeEventRecord[] = [];
+  readonly runtimeOutbox: RuntimeOutboxRecord[] = [];
 
   async createWorkflow(input: WorkflowRepositoryCreateInput): Promise<WorkflowDefinitionRecord> {
     this.workflows.push(cloneWorkflow(input.workflow));
@@ -315,6 +394,29 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
     return cloneVersion(input.version);
   }
 
+  async findRun(input: TenantProjectScope & { readonly workflowId: string; readonly runId: string }): Promise<WorkflowRunRecord | null> {
+    const run = this.runs.find(
+      (candidate) =>
+        candidate.tenantId === input.tenantId &&
+        candidate.projectId === input.projectId &&
+        candidate.workflowId === input.workflowId &&
+        candidate.id === input.runId,
+    );
+
+    return run === undefined ? null : cloneRun(run);
+  }
+
+  async listRuns(input: TenantProjectScope & { readonly workflowId: string }): Promise<WorkflowRunRecord[]> {
+    return this.runs
+      .filter(
+        (run) =>
+          run.tenantId === input.tenantId &&
+          run.projectId === input.projectId &&
+          run.workflowId === input.workflowId,
+      )
+      .map(cloneRun);
+  }
+
   async findRunByIdempotencyKey(input: TenantProjectScope & { readonly workflowId: string; readonly idempotencyKey: string }): Promise<WorkflowRunRecord | null> {
     const run = this.runs.find(
       (candidate) =>
@@ -329,6 +431,8 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
 
   async createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord> {
     this.runs.push(cloneRun(input.run));
+    this.runtimeEvents.push(...input.events.map(cloneRuntimeEvent));
+    this.runtimeOutbox.push(...input.outbox.map(cloneRuntimeOutbox));
     return cloneRun(input.run);
   }
 }
@@ -423,6 +527,30 @@ export class KyselyWorkflowRepository implements WorkflowRepository {
     return toWorkflowVersionRecord(row);
   }
 
+  async findRun(input: TenantProjectScope & { readonly workflowId: string; readonly runId: string }): Promise<WorkflowRunRecord | null> {
+    const row = await this.db
+      .selectFrom('workflow_runs')
+      .selectAll()
+      .where('tenant_id', '=', input.tenantId)
+      .where('project_id', '=', input.projectId)
+      .where('workflow_id', '=', input.workflowId)
+      .where('id', '=', input.runId)
+      .executeTakeFirst();
+    return row === undefined ? null : toWorkflowRunRecord(row);
+  }
+
+  async listRuns(input: TenantProjectScope & { readonly workflowId: string }): Promise<WorkflowRunRecord[]> {
+    const rows = await this.db
+      .selectFrom('workflow_runs')
+      .selectAll()
+      .where('tenant_id', '=', input.tenantId)
+      .where('project_id', '=', input.projectId)
+      .where('workflow_id', '=', input.workflowId)
+      .orderBy('created_at', 'asc')
+      .execute();
+    return rows.map(toWorkflowRunRecord);
+  }
+
   async findRunByIdempotencyKey(input: TenantProjectScope & { readonly workflowId: string; readonly idempotencyKey: string }): Promise<WorkflowRunRecord | null> {
     const row = await this.db
       .selectFrom('workflow_runs')
@@ -436,12 +564,23 @@ export class KyselyWorkflowRepository implements WorkflowRepository {
   }
 
   async createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord> {
-    const row = await this.db
-      .insertInto('workflow_runs')
-      .values(toWorkflowRunRow(input.run))
-      .returningAll()
-      .executeTakeFirstOrThrow();
-    return toWorkflowRunRecord(row);
+    return this.db.transaction().execute(async (transaction) => {
+      const row = await transaction
+        .insertInto('workflow_runs')
+        .values(toWorkflowRunRow(input.run))
+        .returningAll()
+        .executeTakeFirstOrThrow();
+
+      for (const event of input.events) {
+        await transaction.insertInto('runtime_events').values(toRuntimeEventRow(event)).execute();
+      }
+
+      for (const outbox of input.outbox) {
+        await transaction.insertInto('runtime_outbox').values(toRuntimeOutboxRow(outbox)).execute();
+      }
+
+      return toWorkflowRunRecord(row);
+    });
   }
 }
 
@@ -459,6 +598,14 @@ function cloneVersion(version: WorkflowVersionRecord): WorkflowVersionRecord {
 
 function cloneRun(run: WorkflowRunRecord): WorkflowRunRecord {
   return { ...run };
+}
+
+function cloneRuntimeEvent(event: RuntimeEventRecord): RuntimeEventRecord {
+  return { ...event, payload: cloneJsonObject(event.payload) };
+}
+
+function cloneRuntimeOutbox(outbox: RuntimeOutboxRecord): RuntimeOutboxRecord {
+  return { ...outbox };
 }
 
 function toIsoString(value: Date | string): string {
@@ -548,5 +695,37 @@ function toWorkflowRunRow(run: WorkflowRunRecord) {
     idempotency_key: run.idempotencyKey,
     created_at: run.createdAt,
     updated_at: run.updatedAt,
+  };
+}
+
+function toRuntimeEventRow(event: RuntimeEventRecord) {
+  return {
+    id: event.id,
+    tenant_id: event.tenantId,
+    project_id: event.projectId,
+    event_type: event.eventType,
+    event_version: event.eventVersion,
+    ordering_key: event.orderingKey,
+    payload_json: event.payload,
+    occurred_at: event.occurredAt,
+    recorded_at: event.recordedAt,
+  };
+}
+
+function toRuntimeOutboxRow(outbox: RuntimeOutboxRecord) {
+  return {
+    id: outbox.id,
+    tenant_id: outbox.tenantId,
+    project_id: outbox.projectId,
+    event_id: outbox.eventId,
+    topic: outbox.topic,
+    partition_key: outbox.partitionKey,
+    status: outbox.status,
+    publish_attempts: outbox.publishAttempts,
+    next_attempt_at: outbox.nextAttemptAt,
+    published_at: outbox.publishedAt,
+    last_error: outbox.lastError,
+    created_at: outbox.createdAt,
+    updated_at: outbox.updatedAt,
   };
 }
