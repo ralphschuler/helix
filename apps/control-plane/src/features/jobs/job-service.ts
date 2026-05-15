@@ -10,11 +10,14 @@ import type {
   JobHistoryResponse,
   JobLeaseRecord,
   JobRecord,
+  ProcessorRegistryRecord,
   TenantProjectScope,
 } from '@helix/contracts';
 
 import type { HelixDatabase } from '../../db/schema.js';
 import { assertProjectPermission } from '../iam/authorization.js';
+import type { ProcessorRegistryRepository } from '../processors/processor-registry.js';
+import { CapabilityRoutingPolicy, type RoutingPolicy } from '../processors/routing-policy.js';
 import { randomUuidV7LikeId } from '../iam/token-secrets.js';
 import type {
   RuntimeEventRecord,
@@ -97,6 +100,7 @@ export interface JobRepositoryClaimInput extends TenantProjectScope {
   readonly leaseId: string;
   readonly now: Date;
   readonly leaseExpiresAt: Date;
+  readonly isEligible?: ((job: JobRecord) => boolean) | undefined;
 }
 
 export interface JobRepositoryHeartbeatInput extends TenantProjectScope {
@@ -157,6 +161,8 @@ export interface JobRepository {
 
 export interface JobServiceOptions {
   readonly repository: JobRepository;
+  readonly processorRepository?: ProcessorRegistryRepository | undefined;
+  readonly routingPolicy?: RoutingPolicy;
   readonly now?: () => Date;
   readonly generateId?: () => string;
 }
@@ -177,11 +183,15 @@ export class StaleJobAttemptError extends Error {
 
 export class JobService {
   private readonly repository: JobRepository;
+  private readonly processorRepository: ProcessorRegistryRepository | undefined;
+  private readonly routingPolicy: RoutingPolicy;
   private readonly now: () => Date;
   private readonly generateId: () => string;
 
   constructor(options: JobServiceOptions) {
     this.repository = options.repository;
+    this.processorRepository = options.processorRepository;
+    this.routingPolicy = options.routingPolicy ?? new CapabilityRoutingPolicy();
     this.now = options.now ?? (() => new Date());
     this.generateId = options.generateId ?? (() => randomUuidV7LikeId(this.now()));
   }
@@ -270,15 +280,22 @@ export class JobService {
   ): Promise<ClaimReadyJobResult | null> {
     assertProjectPermission(authContext, input, 'agents:claim');
     const timestamp = this.now();
+    const agentId = getAgentIdForClaim(authContext);
+    const processor = await this.findClaimingProcessor(input, agentId);
+
+    if (this.processorRepository !== undefined && processor === null) {
+      return null;
+    }
 
     return this.repository.claimReadyJob({
       tenantId: input.tenantId,
       projectId: input.projectId,
-      agentId: getAgentIdForClaim(authContext),
+      agentId,
       attemptId: this.generateId(),
       leaseId: this.generateId(),
       now: timestamp,
       leaseExpiresAt: calculateLeaseExpiresAt(input.request, timestamp),
+      isEligible: processor === null ? undefined : (job) => this.routingPolicy.evaluate({ job, processor }).eligible,
     });
   }
 
@@ -411,6 +428,21 @@ export class JobService {
       projectId: input.projectId,
       now: timestamp,
       limit: normalizeLimit(input.limit),
+    });
+  }
+
+  private async findClaimingProcessor(
+    input: TenantProjectScope,
+    agentId: string,
+  ): Promise<ProcessorRegistryRecord | null> {
+    if (this.processorRepository === undefined) {
+      return null;
+    }
+
+    return this.processorRepository.findProcessorByAgent({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      agentId,
     });
   }
 
@@ -590,7 +622,8 @@ export class InMemoryJobRepository implements JobRepository {
           candidate.projectId === input.projectId &&
           isReady(candidate, input.now) &&
           candidate.attemptCount < candidate.maxAttempts &&
-          !this.hasActiveLease(candidate),
+          !this.hasActiveLease(candidate) &&
+          (input.isEligible === undefined || input.isEligible(candidate)),
       )
       .sort(compareClaimableJobs)[0];
 
@@ -1057,7 +1090,7 @@ export class KyselyJobRepository implements JobRepository {
 
   async claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null> {
     return this.db.transaction().execute(async (transaction) => {
-      const job = await transaction
+      const candidates = await transaction
         .selectFrom('jobs')
         .selectAll()
         .where('tenant_id', '=', input.tenantId)
@@ -1068,10 +1101,17 @@ export class KyselyJobRepository implements JobRepository {
         .orderBy('priority', 'desc')
         .orderBy('ready_at', 'asc')
         .orderBy('created_at', 'asc')
-        .limit(1)
+        .limit(input.isEligible === undefined ? 1 : 50)
         .forUpdate()
         .skipLocked()
-        .executeTakeFirst();
+        .execute();
+      const job = candidates.find((candidate) => {
+        if (input.isEligible === undefined) {
+          return true;
+        }
+
+        return input.isEligible(toJobRecord(candidate));
+      });
 
       if (job === undefined) {
         return null;

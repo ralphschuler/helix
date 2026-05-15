@@ -14,6 +14,7 @@ import {
   InMemoryJobRepository,
   JobService,
 } from './features/jobs/job-service.js';
+import { InMemoryProcessorRegistryRepository } from './features/processors/processor-registry.js';
 import { createApp, type ApiAuthProvider } from './server/app.js';
 
 const tenantId = '01890f42-98c4-7cc3-8a5e-0c567f1d3a77';
@@ -85,6 +86,7 @@ function createJobsApp(
   options: {
     readonly ids?: readonly string[];
     readonly now?: () => Date;
+    readonly processorRepository?: InMemoryProcessorRegistryRepository | undefined;
   } = {},
 ) {
   const service = new JobService({
@@ -104,6 +106,7 @@ function createJobsApp(
     ),
     now: options.now ?? (() => new Date('2026-05-15T13:00:00.000Z')),
     repository,
+    processorRepository: options.processorRepository,
   });
   const app = createApp({
     apiAuthProvider: createFixedApiAuthProvider(authContext),
@@ -337,6 +340,100 @@ describe('job API', () => {
     expect(repository.jobs).toHaveLength(1);
     expect(repository.attempts).toHaveLength(1);
     expect(repository.leases).toHaveLength(1);
+  });
+
+  it('routes claims only to processors with matching capabilities and constraints', async () => {
+    const repository = new InMemoryJobRepository();
+    const processorRepository = new InMemoryProcessorRegistryRepository();
+    await processorRepository.upsertProcessor({
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3e01',
+      tenantId,
+      projectId,
+      agentId,
+      capabilities: [{ name: 'thumbnail', version: '1.2.0' }],
+      hardware: { gpu: true, memoryMb: 16_384 },
+      region: 'us-east-1',
+      labels: { tier: 'prod' },
+      tags: ['images'],
+      routingExplanation: {
+        eligible: true,
+        reasons: ['registered'],
+        matchedCapabilities: ['thumbnail'],
+        rejectedConstraints: [],
+        metadata: {},
+      },
+      createdAt: '2026-05-15T13:00:00.000Z',
+      updatedAt: '2026-05-15T13:00:00.000Z',
+    });
+    await processorRepository.upsertProcessor({
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3e02',
+      tenantId,
+      projectId,
+      agentId: otherAgentId,
+      capabilities: [{ name: 'ocr', version: '2.0.0' }],
+      hardware: { gpu: false, memoryMb: 1024 },
+      region: 'eu-west-1',
+      labels: { tier: 'dev' },
+      tags: ['text'],
+      routingExplanation: {
+        eligible: true,
+        reasons: ['registered'],
+        matchedCapabilities: ['ocr'],
+        rejectedConstraints: [],
+        metadata: {},
+      },
+      createdAt: '2026-05-15T13:00:00.000Z',
+      updatedAt: '2026-05-15T13:00:00.000Z',
+    });
+    const producerApp = createJobsApp(projectAuth, repository).app;
+    await producerApp.request('/api/v1/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+        'idempotency-key': 'create-job:routing-test',
+      },
+      body: JSON.stringify({
+        constraints: {
+          capability: 'thumbnail',
+          capabilityVersion: '1.2.0',
+          requireGpu: true,
+          minMemoryMb: 4096,
+          region: 'us-east-1',
+          labels: { tier: 'prod' },
+          tags: ['images'],
+        },
+      }),
+    });
+    const ineligibleApp = createJobsApp(otherAgentAuth, repository, { processorRepository }).app;
+    const eligibleApp = createJobsApp(agentAuth, repository, {
+      processorRepository,
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e11',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3e12',
+      ],
+    }).app;
+
+    const rejectedClaim = await ineligibleApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: { authorization: 'Bearer valid-project-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ leaseTtlSeconds: 600 }),
+    });
+    const acceptedClaim = await eligibleApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: { authorization: 'Bearer valid-project-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ leaseTtlSeconds: 600 }),
+    });
+
+    expect(claimJobResponseSchema.parse(await rejectedClaim.json())).toEqual({ claim: null });
+    const acceptedBody = claimJobResponseSchema.parse(await acceptedClaim.json());
+
+    expect(acceptedBody.claim).toMatchObject({
+      job: { constraints: { capability: 'thumbnail' }, state: 'running' },
+      attempt: { agentId },
+      lease: { agentId },
+    });
+    expect(repository.attempts).toHaveLength(1);
   });
 
   it('completes a claimed job once and treats duplicate completion as idempotent', async () => {
