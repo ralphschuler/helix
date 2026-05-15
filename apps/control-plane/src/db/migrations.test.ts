@@ -157,6 +157,32 @@ describe('database migration runner', () => {
     ).resolves.toBe(jobMigration?.sql);
   });
 
+  it('ships workflow definition and version schema with immutable published snapshots and run version refs', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const workflowMigration = migrations.find(
+      (migration) => migration.id === '0007_workflow_definition_version_schema',
+    );
+
+    expect(workflowMigration).toBeDefined();
+    expect(workflowMigration?.sql).toContain('create table if not exists workflow_definitions');
+    expect(workflowMigration?.sql).toContain('create table if not exists workflow_versions');
+    expect(workflowMigration?.sql).toContain('create table if not exists workflow_runs');
+    expect(workflowMigration?.sql).toMatch(/workflow_definitions[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null/u);
+    expect(workflowMigration?.sql).toContain('workflow_definitions_project_scope_fk');
+    expect(workflowMigration?.sql).toContain('draft_graph_json jsonb not null');
+    expect(workflowMigration?.sql).toContain('workflow_versions_workflow_scope_fk');
+    expect(workflowMigration?.sql).toContain('workflow_versions_number_unique');
+    expect(workflowMigration?.sql).toContain('workflow_versions_graph_is_object');
+    expect(workflowMigration?.sql).toContain('workflow_runs_version_scope_fk');
+    expect(workflowMigration?.sql).toContain('workflow_runs_version_matches_workflow_fk');
+    expect(workflowMigration?.sql).toContain('workflow_runs_idempotency_key_unique unique (tenant_id, project_id, workflow_id, idempotency_key)');
+    expect(workflowMigration?.sql).not.toContain('payload_bytes');
+
+    await expect(
+      readFile(path.join(getDefaultMigrationsDirectory(), '0007_workflow_definition_version_schema.sql'), 'utf8'),
+    ).resolves.toBe(workflowMigration?.sql);
+  });
+
   it('ships custom role disable migration for safe soft-disable semantics', async () => {
     const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
     const customRoleDisableMigration = migrations.find(

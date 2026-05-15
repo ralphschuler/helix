@@ -4,9 +4,13 @@ import {
   claimJobRequestSchema,
   completeJobAttemptRequestSchema,
   createJobRequestSchema,
+  createWorkflowRequestSchema,
   failJobAttemptRequestSchema,
   heartbeatLeaseRequestSchema,
   idempotencyKeySchema,
+  publishWorkflowRequestSchema,
+  startWorkflowRunRequestSchema,
+  updateWorkflowDraftRequestSchema,
   uuidV7Schema,
   type AuthContext,
   type Permission,
@@ -41,6 +45,11 @@ import {
   StaleJobAttemptError,
   type JobService,
 } from '../features/jobs/job-service.js';
+import {
+  WorkflowRunIdempotencyConflictError,
+  WorkflowVersionNotFoundError,
+  type WorkflowService,
+} from '../features/workflows/workflow-service.js';
 
 type AppEnvironment = {
   Variables: {
@@ -104,6 +113,7 @@ export interface CreateAppOptions {
   readonly stripeBillingWebhookHandler?: BillingWebhookHandler;
   readonly customRoleService?: CustomRoleService;
   readonly jobService?: JobService;
+  readonly workflowService?: WorkflowService;
 }
 
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -124,6 +134,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
       repository: new InMemoryCustomRoleRepository(),
     });
   const jobService = options.jobService;
+  const workflowService = options.workflowService;
 
   app.get('/health', (context) =>
     context.json({
@@ -161,6 +172,216 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
   });
 
   app.use('/api/v1/*', createApiAuthMiddleware(options.apiAuthProvider));
+
+  app.post('/api/v1/workflows', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = createWorkflowRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_workflow_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const workflow = await workflowService.createWorkflow(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        request: request.data,
+      });
+      return context.json({ workflow }, 201);
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.get('/api/v1/workflows', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const workflows = await workflowService.listWorkflows(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+      });
+      return context.json({ workflows });
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.get('/api/v1/workflows/:workflowId', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    const workflowId = uuidV7Schema.safeParse(context.req.param('workflowId'));
+
+    if (!workflowId.success) {
+      return context.json({ error: 'invalid_workflow_id' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const workflow = await workflowService.getWorkflow(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+      });
+
+      if (workflow === null) {
+        return context.json({ error: 'workflow_not_found' }, 404);
+      }
+
+      return context.json({ workflow });
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.patch('/api/v1/workflows/:workflowId', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    const workflowId = uuidV7Schema.safeParse(context.req.param('workflowId'));
+
+    if (!workflowId.success) {
+      return context.json({ error: 'invalid_workflow_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = updateWorkflowDraftRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_workflow_update_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const workflow = await workflowService.updateDraft(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+        request: request.data,
+      });
+
+      if (workflow === null) {
+        return context.json({ error: 'workflow_not_found' }, 404);
+      }
+
+      return context.json({ workflow });
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.post('/api/v1/workflows/:workflowId/publish', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    const workflowId = uuidV7Schema.safeParse(context.req.param('workflowId'));
+
+    if (!workflowId.success) {
+      return context.json({ error: 'invalid_workflow_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = publishWorkflowRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_publish_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const version = await workflowService.publishWorkflow(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+      });
+
+      if (version === null) {
+        return context.json({ error: 'workflow_not_found' }, 404);
+      }
+
+      return context.json({ version }, 201);
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.post('/api/v1/workflows/:workflowId/runs', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    const workflowId = uuidV7Schema.safeParse(context.req.param('workflowId'));
+
+    if (!workflowId.success) {
+      return context.json({ error: 'invalid_workflow_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = startWorkflowRunRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_workflow_run_request' }, 400);
+    }
+
+    const idempotencyKey = idempotencyKeySchema.safeParse(
+      context.req.header('idempotency-key'),
+    );
+
+    if (!idempotencyKey.success) {
+      return context.json({ error: 'invalid_idempotency_key' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const result = await workflowService.startRun(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+        idempotencyKey: idempotencyKey.data,
+        request: request.data,
+      });
+
+      if (result === null) {
+        return context.json({ error: 'workflow_not_found' }, 404);
+      }
+
+      return context.json({ run: result.run }, result.created ? 201 : 200);
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
 
   app.post('/api/v1/jobs', async (context) => {
     if (jobService === undefined) {
@@ -827,6 +1048,25 @@ function getStringArrayField(body: Record<string, unknown>, field: string): read
   }
 
   return value as string[];
+}
+
+function handleWorkflowApiError(
+  context: Context<AppEnvironment>,
+  error: unknown,
+): Response {
+  if (error instanceof AuthorizationError) {
+    return context.json({ error: error.reason }, 403);
+  }
+
+  if (error instanceof WorkflowVersionNotFoundError) {
+    return context.json({ error: 'workflow_version_not_found' }, 404);
+  }
+
+  if (error instanceof WorkflowRunIdempotencyConflictError) {
+    return context.json({ error: 'idempotency_conflict' }, 409);
+  }
+
+  throw error;
 }
 
 function handleJobApiError(

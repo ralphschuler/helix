@@ -1,5 +1,5 @@
 import type { ColumnType } from 'kysely';
-import type { AttemptState, BillingStatus, JobState, LeaseState } from '@helix/contracts';
+import type { AttemptState, BillingStatus, JobState, LeaseState, WorkflowRunRecord } from '@helix/contracts';
 
 export type TimestampColumn = ColumnType<Date, Date | string | undefined, Date | string>;
 export type NullableTimestampColumn = ColumnType<
@@ -236,6 +236,48 @@ export interface RuntimeInboxTable {
 export type JobStateColumn = ColumnType<JobState, JobState | undefined, JobState>;
 export type AttemptStateColumn = ColumnType<AttemptState, AttemptState | undefined, AttemptState>;
 export type LeaseStateColumn = ColumnType<LeaseState, LeaseState | undefined, LeaseState>;
+export type WorkflowRunStateColumn = ColumnType<
+  WorkflowRunRecord['state'],
+  WorkflowRunRecord['state'] | undefined,
+  WorkflowRunRecord['state']
+>;
+
+export interface WorkflowDefinitionsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  slug: string;
+  name: string;
+  description: NullableTextColumn;
+  draft_graph_json: JsonColumn;
+  metadata_json: JsonColumn;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
+export interface WorkflowVersionsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  workflow_id: string;
+  version_number: number;
+  graph_json: JsonColumn;
+  metadata_json: JsonColumn;
+  published_at: TimestampColumn;
+  created_at: TimestampColumn;
+}
+
+export interface WorkflowRunsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  workflow_id: string;
+  workflow_version_id: string;
+  state: WorkflowRunStateColumn;
+  idempotency_key: string;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
 
 export interface JobsTable {
   id: string;
@@ -302,6 +344,9 @@ export interface HelixDatabase {
   billing_stripe_customers: BillingStripeCustomersTable;
   billing_stripe_webhook_events: BillingStripeWebhookEventsTable;
   billing_usage_ledger: BillingUsageLedgerTable;
+  workflow_definitions: WorkflowDefinitionsTable;
+  workflow_versions: WorkflowVersionsTable;
+  workflow_runs: WorkflowRunsTable;
   jobs: JobsTable;
   job_attempts: JobAttemptsTable;
   job_leases: JobLeasesTable;
