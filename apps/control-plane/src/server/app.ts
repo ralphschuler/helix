@@ -2,7 +2,9 @@ import { Hono } from 'hono';
 import type { Context, MiddlewareHandler } from 'hono';
 import {
   claimJobRequestSchema,
+  completeJobAttemptRequestSchema,
   createJobRequestSchema,
+  failJobAttemptRequestSchema,
   heartbeatLeaseRequestSchema,
   idempotencyKeySchema,
   uuidV7Schema,
@@ -36,6 +38,7 @@ import {
 import type { SecurityAuditSink } from '../features/iam/security-audit.js';
 import {
   AgentClaimRequiredError,
+  StaleJobAttemptError,
   type JobService,
 } from '../features/jobs/job-service.js';
 
@@ -296,6 +299,113 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
       }
 
       return context.json({ lease });
+    } catch (error) {
+      return handleJobApiError(context, error);
+    }
+  });
+
+  app.post('/api/v1/jobs/:jobId/attempts/:attemptId/leases/:leaseId/complete', async (context) => {
+    if (jobService === undefined) {
+      return context.json({ error: 'job_service_not_configured' }, 503);
+    }
+
+    const jobId = uuidV7Schema.safeParse(context.req.param('jobId'));
+    const attemptId = uuidV7Schema.safeParse(context.req.param('attemptId'));
+    const leaseId = uuidV7Schema.safeParse(context.req.param('leaseId'));
+
+    if (!jobId.success) {
+      return context.json({ error: 'invalid_job_id' }, 400);
+    }
+
+    if (!attemptId.success) {
+      return context.json({ error: 'invalid_attempt_id' }, 400);
+    }
+
+    if (!leaseId.success) {
+      return context.json({ error: 'invalid_lease_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = completeJobAttemptRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_complete_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const result = await jobService.completeJobAttempt(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        jobId: jobId.data,
+        attemptId: attemptId.data,
+        leaseId: leaseId.data,
+      });
+
+      if (result === null) {
+        return context.json({ error: 'attempt_not_found' }, 404);
+      }
+
+      return context.json(result);
+    } catch (error) {
+      return handleJobApiError(context, error);
+    }
+  });
+
+  app.post('/api/v1/jobs/:jobId/attempts/:attemptId/leases/:leaseId/fail', async (context) => {
+    if (jobService === undefined) {
+      return context.json({ error: 'job_service_not_configured' }, 503);
+    }
+
+    const jobId = uuidV7Schema.safeParse(context.req.param('jobId'));
+    const attemptId = uuidV7Schema.safeParse(context.req.param('attemptId'));
+    const leaseId = uuidV7Schema.safeParse(context.req.param('leaseId'));
+
+    if (!jobId.success) {
+      return context.json({ error: 'invalid_job_id' }, 400);
+    }
+
+    if (!attemptId.success) {
+      return context.json({ error: 'invalid_attempt_id' }, 400);
+    }
+
+    if (!leaseId.success) {
+      return context.json({ error: 'invalid_lease_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = failJobAttemptRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_fail_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const result = await jobService.failJobAttempt(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        jobId: jobId.data,
+        attemptId: attemptId.data,
+        leaseId: leaseId.data,
+        request: request.data,
+      });
+
+      if (result === null) {
+        return context.json({ error: 'attempt_not_found' }, 404);
+      }
+
+      return context.json(result);
     } catch (error) {
       return handleJobApiError(context, error);
     }
@@ -700,6 +810,10 @@ function handleJobApiError(
 
   if (error instanceof AgentClaimRequiredError) {
     return context.json({ error: 'agent_token_required' }, 403);
+  }
+
+  if (error instanceof StaleJobAttemptError) {
+    return context.json({ error: 'stale_attempt' }, 409);
   }
 
   if (error instanceof Error && error.message.includes('idempotencyKey')) {

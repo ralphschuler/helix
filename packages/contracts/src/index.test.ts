@@ -14,12 +14,18 @@ import {
   eventEnvelopeSchema,
   claimJobRequestSchema,
   claimJobResponseSchema,
+  completeJobAttemptRequestSchema,
+  completeJobAttemptResponseSchema,
   createJobRequestSchema,
+  failJobAttemptRequestSchema,
+  failJobAttemptResponseSchema,
   heartbeatLeaseRequestSchema,
   heartbeatLeaseResponseSchema,
   idempotencyKeySchema,
   idempotencyKeyScopeSchema,
   jobAttemptRecordSchema,
+  jobAttemptFailedEventPayloadSchema,
+  jobCompletedEventPayloadSchema,
   jobCreatedEventPayloadSchema,
   jobLeaseRecordSchema,
   jobListResponseSchema,
@@ -249,7 +255,114 @@ describe('job execution contracts', () => {
       claim: { job, attempt, lease },
     });
     expect(claimJobResponseSchema.parse({ claim: null })).toEqual({ claim: null });
+    const completedJob = {
+      ...job,
+      state: 'completed',
+      attemptCount: 1,
+      updatedAt: '2026-05-12T19:05:00.000Z',
+      finishedAt: '2026-05-12T19:05:00.000Z',
+    };
+    const completedAttempt = {
+      ...attempt,
+      state: 'completed',
+      finishedAt: '2026-05-12T19:05:00.000Z',
+    };
+    const releasedLease = {
+      ...lease,
+      state: 'released',
+      releasedAt: '2026-05-12T19:05:00.000Z',
+    };
+
     expect(heartbeatLeaseResponseSchema.parse({ lease })).toEqual({ lease });
+    expect(completeJobAttemptRequestSchema.parse({})).toEqual({});
+    expect(
+      completeJobAttemptResponseSchema.parse({
+        transition: { job: completedJob, attempt: completedAttempt, lease: releasedLease },
+        duplicate: false,
+      }),
+    ).toEqual({
+      transition: { job: completedJob, attempt: completedAttempt, lease: releasedLease },
+      duplicate: false,
+    });
+    expect(
+      jobCompletedEventPayloadSchema.parse({
+        tenantId: validTenantId,
+        projectId: validProjectId,
+        jobId: job.id,
+        attemptId: attempt.id,
+        leaseId: lease.id,
+        agentId: attempt.agentId,
+        completedAt: '2026-05-12T19:05:00.000Z',
+      }),
+    ).toEqual({
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: job.id,
+      attemptId: attempt.id,
+      leaseId: lease.id,
+      agentId: attempt.agentId,
+      completedAt: '2026-05-12T19:05:00.000Z',
+    });
+
+    const failedJob = {
+      ...job,
+      state: 'retrying',
+      attemptCount: 1,
+      readyAt: '2026-05-12T19:06:00.000Z',
+      updatedAt: '2026-05-12T19:06:00.000Z',
+    };
+    const failedAttempt = {
+      ...attempt,
+      state: 'failed',
+      finishedAt: '2026-05-12T19:06:00.000Z',
+      failureCode: 'processor_error',
+      failureMessage: 'GPU unavailable',
+    };
+    const failedLease = {
+      ...lease,
+      state: 'released',
+      releasedAt: '2026-05-12T19:06:00.000Z',
+    };
+
+    expect(
+      failJobAttemptRequestSchema.parse({
+        failureCode: 'processor_error',
+        failureMessage: 'GPU unavailable',
+      }),
+    ).toEqual({ failureCode: 'processor_error', failureMessage: 'GPU unavailable' });
+    expect(
+      failJobAttemptResponseSchema.parse({
+        transition: { job: failedJob, attempt: failedAttempt, lease: failedLease },
+        duplicate: false,
+      }),
+    ).toEqual({
+      transition: { job: failedJob, attempt: failedAttempt, lease: failedLease },
+      duplicate: false,
+    });
+    expect(
+      jobAttemptFailedEventPayloadSchema.parse({
+        tenantId: validTenantId,
+        projectId: validProjectId,
+        jobId: job.id,
+        attemptId: attempt.id,
+        leaseId: lease.id,
+        agentId: attempt.agentId,
+        failureCode: 'processor_error',
+        failureMessage: 'GPU unavailable',
+        failedAt: '2026-05-12T19:06:00.000Z',
+      }),
+    ).toEqual({
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: job.id,
+      attemptId: attempt.id,
+      leaseId: lease.id,
+      agentId: attempt.agentId,
+      failureCode: 'processor_error',
+      failureMessage: 'GPU unavailable',
+      failedAt: '2026-05-12T19:06:00.000Z',
+    });
+    expect(() => failJobAttemptRequestSchema.parse({ failureCode: '   ' })).toThrow();
     expect(
       jobCreatedEventPayloadSchema.parse({
         tenantId: validTenantId,
