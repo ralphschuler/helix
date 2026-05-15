@@ -1,4 +1,7 @@
+import type { Kysely, Selectable } from 'kysely';
 import type { AuthContext, Permission, TenantProjectScope } from '@helix/contracts';
+
+import type { HelixDatabase } from '../../db/schema.js';
 
 import { assertProjectPermission } from '../iam/authorization.js';
 import type { SecurityAuditSink } from '../iam/security-audit.js';
@@ -71,6 +74,102 @@ export interface IssuedAgentToken {
 
 export interface RevokeAgentInput extends TenantProjectScope {
   readonly id: string;
+}
+
+export class KyselyAgentRepository implements AgentRepository {
+  private readonly db: Kysely<HelixDatabase>;
+
+  constructor(db: Kysely<HelixDatabase>) {
+    this.db = db;
+  }
+
+  async insertAgent(record: AgentRecord): Promise<void> {
+    await this.db
+      .insertInto('agents')
+      .values({
+        id: record.id,
+        tenant_id: record.tenantId,
+        project_id: record.projectId,
+        name: record.name,
+        credential_prefix: record.credentialPrefix,
+        credential_hash_sha256: record.credentialHashSha256,
+        permissions_json: record.permissions,
+        created_by_type: record.createdByType,
+        created_by_id: record.createdById,
+        revoked_at: record.revokedAt,
+        revoked_by_type: record.revokedByType,
+        revoked_by_id: record.revokedById,
+        created_at: record.createdAt,
+        updated_at: record.updatedAt,
+      })
+      .execute();
+  }
+
+  async findAgentById(id: string): Promise<AgentRecord | null> {
+    const row = await this.db
+      .selectFrom('agents')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirst();
+
+    return row === undefined ? null : toAgentRecord(row);
+  }
+
+  async findAgentByCredentialPrefix(credentialPrefix: string): Promise<AgentRecord | null> {
+    const row = await this.db
+      .selectFrom('agents')
+      .selectAll()
+      .where('credential_prefix', '=', credentialPrefix)
+      .executeTakeFirst();
+
+    return row === undefined ? null : toAgentRecord(row);
+  }
+
+  async markAgentRevoked(input: {
+    readonly id: string;
+    readonly revokedAt: Date;
+    readonly revokedByType: string;
+    readonly revokedById: string;
+  }): Promise<void> {
+    await this.db
+      .updateTable('agents')
+      .set({
+        revoked_at: input.revokedAt,
+        revoked_by_type: input.revokedByType,
+        revoked_by_id: input.revokedById,
+        updated_at: input.revokedAt,
+      })
+      .where('id', '=', input.id)
+      .execute();
+  }
+
+  async insertAgentToken(record: AgentTokenRecord): Promise<void> {
+    await this.db
+      .insertInto('agent_tokens')
+      .values({
+        id: record.id,
+        tenant_id: record.tenantId,
+        project_id: record.projectId,
+        agent_id: record.agentId,
+        token_prefix: record.tokenPrefix,
+        token_hash_sha256: record.tokenHashSha256,
+        permissions_json: record.permissions,
+        expires_at: record.expiresAt,
+        revoked_at: record.revokedAt,
+        created_at: record.createdAt,
+      })
+      .execute();
+  }
+
+  async findAgentTokenByPrefix(tokenPrefix: string): Promise<AgentTokenRecord | null> {
+    const row = await this.db
+      .selectFrom('agent_tokens')
+      .selectAll()
+      .where('token_prefix', '=', tokenPrefix)
+      .executeTakeFirst();
+
+    return row === undefined ? null : toAgentTokenRecord(row);
+  }
 }
 
 export interface AgentAuthServiceOptions {
@@ -240,7 +339,7 @@ export class AgentAuthService {
       projectId: tokenRecord.projectId,
       principal: {
         type: 'agent_token',
-        id: tokenRecord.id,
+        id: agent.id,
       },
       permissions: [...tokenRecord.permissions],
     };
@@ -281,6 +380,40 @@ export class AgentAuthService {
       occurredAt: revokedAt,
     });
   }
+}
+
+function toAgentRecord(row: Selectable<HelixDatabase['agents']>): AgentRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    name: row.name,
+    credentialPrefix: row.credential_prefix,
+    credentialHashSha256: row.credential_hash_sha256,
+    permissions: row.permissions_json as readonly Permission[],
+    createdByType: row.created_by_type,
+    createdById: row.created_by_id,
+    revokedAt: row.revoked_at,
+    revokedByType: row.revoked_by_type,
+    revokedById: row.revoked_by_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toAgentTokenRecord(row: Selectable<HelixDatabase['agent_tokens']>): AgentTokenRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    agentId: row.agent_id,
+    tokenPrefix: row.token_prefix,
+    tokenHashSha256: row.token_hash_sha256,
+    permissions: row.permissions_json as readonly Permission[],
+    expiresAt: row.expires_at,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+  };
 }
 
 function assertNonEmptyPermissions(permissions: readonly Permission[]): void {

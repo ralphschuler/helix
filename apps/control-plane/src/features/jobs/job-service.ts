@@ -1,7 +1,12 @@
 import type { Kysely, Selectable } from 'kysely';
 import type {
   AuthContext,
+  ClaimJobRequest,
+  ClaimedJob as ClaimedJobRecord,
   CreateJobRequest,
+  HeartbeatLeaseRequest,
+  JobAttemptRecord,
+  JobLeaseRecord,
   JobRecord,
   TenantProjectScope,
 } from '@helix/contracts';
@@ -15,6 +20,9 @@ import type {
 } from '../runtime/transactional-outbox.js';
 
 const runtimeEventTopic = 'helix.runtime.events';
+const defaultLeaseTtlSeconds = 300;
+const maxLeaseTtlSeconds = 86_400;
+const defaultExpiredLeaseLimit = 50;
 
 export interface CreateJobInput extends TenantProjectScope {
   readonly idempotencyKey: string;
@@ -25,11 +33,29 @@ export interface GetJobInput extends TenantProjectScope {
   readonly jobId: string;
 }
 
+export interface ClaimReadyJobInput extends TenantProjectScope {
+  readonly request: ClaimJobRequest;
+}
+
+export interface HeartbeatLeaseInput extends TenantProjectScope {
+  readonly jobId: string;
+  readonly leaseId: string;
+  readonly request: HeartbeatLeaseRequest;
+}
+
+export interface ExpireLeasesInput extends TenantProjectScope {
+  readonly limit?: number;
+}
+
 export interface CreateJobResult {
   readonly job: JobRecord;
   readonly created: boolean;
   readonly ready: boolean;
 }
+
+export type ClaimReadyJobResult = ClaimedJobRecord;
+export type HeartbeatLeaseResult = JobLeaseRecord;
+export type ExpiredLeaseResult = ClaimedJobRecord;
 
 export interface JobRepositoryCreateInput {
   readonly job: JobRecord;
@@ -42,6 +68,27 @@ export interface JobRepositoryCreateResult {
   readonly created: boolean;
 }
 
+export interface JobRepositoryClaimInput extends TenantProjectScope {
+  readonly agentId: string;
+  readonly attemptId: string;
+  readonly leaseId: string;
+  readonly now: Date;
+  readonly leaseExpiresAt: Date;
+}
+
+export interface JobRepositoryHeartbeatInput extends TenantProjectScope {
+  readonly jobId: string;
+  readonly leaseId: string;
+  readonly agentId: string;
+  readonly now: Date;
+  readonly leaseExpiresAt: Date;
+}
+
+export interface JobRepositoryExpireLeasesInput extends TenantProjectScope {
+  readonly now: Date;
+  readonly limit: number;
+}
+
 export interface JobRepository {
   findJobByIdempotencyKey(input: TenantProjectScope & {
     readonly idempotencyKey: string;
@@ -51,12 +98,22 @@ export interface JobRepository {
   ): Promise<JobRepositoryCreateResult>;
   findJobById(input: GetJobInput): Promise<JobRecord | null>;
   listJobs(input: TenantProjectScope): Promise<JobRecord[]>;
+  claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null>;
+  heartbeatLease(input: JobRepositoryHeartbeatInput): Promise<JobLeaseRecord | null>;
+  expireLeases(input: JobRepositoryExpireLeasesInput): Promise<ExpiredLeaseResult[]>;
 }
 
 export interface JobServiceOptions {
   readonly repository: JobRepository;
   readonly now?: () => Date;
   readonly generateId?: () => string;
+}
+
+export class AgentClaimRequiredError extends Error {
+  constructor() {
+    super('Agent-token authentication is required to claim or heartbeat jobs.');
+    this.name = 'AgentClaimRequiredError';
+  }
 }
 
 export class JobService {
@@ -139,6 +196,53 @@ export class JobService {
     return this.repository.listJobs(input);
   }
 
+  async claimReadyJob(
+    authContext: AuthContext,
+    input: ClaimReadyJobInput,
+  ): Promise<ClaimReadyJobResult | null> {
+    assertProjectPermission(authContext, input, 'agents:claim');
+    const timestamp = this.now();
+
+    return this.repository.claimReadyJob({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      agentId: getAgentIdForClaim(authContext),
+      attemptId: this.generateId(),
+      leaseId: this.generateId(),
+      now: timestamp,
+      leaseExpiresAt: calculateLeaseExpiresAt(input.request, timestamp),
+    });
+  }
+
+  async heartbeatLease(
+    authContext: AuthContext,
+    input: HeartbeatLeaseInput,
+  ): Promise<HeartbeatLeaseResult | null> {
+    assertProjectPermission(authContext, input, 'agents:claim');
+    const timestamp = this.now();
+
+    return this.repository.heartbeatLease({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: input.jobId,
+      leaseId: input.leaseId,
+      agentId: getAgentIdForClaim(authContext),
+      now: timestamp,
+      leaseExpiresAt: calculateLeaseExpiresAt(input.request, timestamp),
+    });
+  }
+
+  async expireLeases(input: ExpireLeasesInput): Promise<ExpiredLeaseResult[]> {
+    const timestamp = this.now();
+
+    return this.repository.expireLeases({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      now: timestamp,
+      limit: normalizeLimit(input.limit),
+    });
+  }
+
   private createJobEvents(job: JobRecord, timestamp: Date): RuntimeEventRecord[] {
     const events: RuntimeEventRecord[] = [
       this.createRuntimeEvent({
@@ -218,6 +322,8 @@ export class JobService {
 
 export class InMemoryJobRepository implements JobRepository {
   readonly jobs: JobRecord[] = [];
+  readonly attempts: JobAttemptRecord[] = [];
+  readonly leases: JobLeaseRecord[] = [];
   readonly runtimeEvents: RuntimeEventRecord[] = [];
   readonly runtimeOutbox: RuntimeOutboxRecord[] = [];
 
@@ -269,6 +375,213 @@ export class InMemoryJobRepository implements JobRepository {
     return this.jobs.filter(
       (job) => job.tenantId === input.tenantId && job.projectId === input.projectId,
     );
+  }
+
+  async claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null> {
+    const job = this.jobs
+      .filter(
+        (candidate) =>
+          candidate.tenantId === input.tenantId &&
+          candidate.projectId === input.projectId &&
+          isReady(candidate, input.now) &&
+          candidate.attemptCount < candidate.maxAttempts &&
+          !this.hasActiveLease(candidate),
+      )
+      .sort(compareClaimableJobs)[0];
+
+    if (job === undefined) {
+      return null;
+    }
+
+    const updatedJob: JobRecord = {
+      ...job,
+      state: 'running',
+      attemptCount: job.attemptCount + 1,
+      updatedAt: input.now.toISOString(),
+      finishedAt: null,
+    };
+    const attempt: JobAttemptRecord = {
+      id: input.attemptId,
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: job.id,
+      attemptNumber: updatedJob.attemptCount,
+      state: 'running',
+      agentId: input.agentId,
+      startedAt: input.now.toISOString(),
+      finishedAt: null,
+      failureCode: null,
+      failureMessage: null,
+    };
+    const lease: JobLeaseRecord = {
+      id: input.leaseId,
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: job.id,
+      attemptId: attempt.id,
+      agentId: input.agentId,
+      state: 'active',
+      acquiredAt: input.now.toISOString(),
+      expiresAt: input.leaseExpiresAt.toISOString(),
+      lastHeartbeatAt: input.now.toISOString(),
+      releasedAt: null,
+      expiredAt: null,
+      canceledAt: null,
+    };
+
+    this.replaceJob(updatedJob);
+    this.attempts.push(attempt);
+    this.leases.push(lease);
+
+    return { job: updatedJob, attempt, lease };
+  }
+
+  async heartbeatLease(input: JobRepositoryHeartbeatInput): Promise<JobLeaseRecord | null> {
+    const lease = this.leases.find(
+      (candidate) =>
+        candidate.tenantId === input.tenantId &&
+        candidate.projectId === input.projectId &&
+        candidate.jobId === input.jobId &&
+        candidate.id === input.leaseId &&
+        candidate.agentId === input.agentId &&
+        candidate.state === 'active' &&
+        Date.parse(candidate.expiresAt) > input.now.getTime(),
+    );
+
+    if (lease === undefined) {
+      return null;
+    }
+
+    const extendedExpiresAt = maxDate(new Date(lease.expiresAt), input.leaseExpiresAt);
+    const updatedLease: JobLeaseRecord = {
+      ...lease,
+      expiresAt: extendedExpiresAt.toISOString(),
+      lastHeartbeatAt: input.now.toISOString(),
+    };
+
+    this.replaceLease(updatedLease);
+
+    return updatedLease;
+  }
+
+  async expireLeases(input: JobRepositoryExpireLeasesInput): Promise<ExpiredLeaseResult[]> {
+    const expired: ExpiredLeaseResult[] = [];
+    const activeExpiredLeases = this.leases
+      .filter(
+        (lease) =>
+          lease.tenantId === input.tenantId &&
+          lease.projectId === input.projectId &&
+          lease.state === 'active' &&
+          Date.parse(lease.expiresAt) <= input.now.getTime(),
+      )
+      .sort((left, right) => Date.parse(left.expiresAt) - Date.parse(right.expiresAt))
+      .slice(0, input.limit);
+
+    for (const lease of activeExpiredLeases) {
+      const attempt = this.attempts.find(
+        (candidate) =>
+          candidate.tenantId === lease.tenantId &&
+          candidate.projectId === lease.projectId &&
+          candidate.jobId === lease.jobId &&
+          candidate.id === lease.attemptId &&
+          candidate.state === 'running',
+      );
+      const job = this.jobs.find(
+        (candidate) =>
+          candidate.tenantId === lease.tenantId &&
+          candidate.projectId === lease.projectId &&
+          candidate.id === lease.jobId &&
+          candidate.state === 'running',
+      );
+
+      if (attempt === undefined || job === undefined) {
+        continue;
+      }
+
+      const updatedLease: JobLeaseRecord = {
+        ...lease,
+        state: 'expired',
+        expiredAt: input.now.toISOString(),
+      };
+      const updatedAttempt: JobAttemptRecord = {
+        ...attempt,
+        state: 'expired',
+        finishedAt: input.now.toISOString(),
+      };
+      const exhaustedAttempts = job.attemptCount >= job.maxAttempts;
+      const updatedJob: JobRecord = {
+        ...job,
+        state: exhaustedAttempts ? 'failed' : 'retrying',
+        readyAt: input.now.toISOString(),
+        updatedAt: input.now.toISOString(),
+        finishedAt: exhaustedAttempts ? input.now.toISOString() : null,
+      };
+
+      this.replaceLease(updatedLease);
+      this.replaceAttempt(updatedAttempt);
+      this.replaceJob(updatedJob);
+      expired.push({ job: updatedJob, attempt: updatedAttempt, lease: updatedLease });
+    }
+
+    return expired;
+  }
+
+  private hasActiveLease(job: JobRecord): boolean {
+    return this.leases.some(
+      (lease) =>
+        lease.tenantId === job.tenantId &&
+        lease.projectId === job.projectId &&
+        lease.jobId === job.id &&
+        lease.state === 'active',
+    );
+  }
+
+  private replaceJob(job: JobRecord): void {
+    const index = this.jobs.findIndex(
+      (candidate) =>
+        candidate.tenantId === job.tenantId &&
+        candidate.projectId === job.projectId &&
+        candidate.id === job.id,
+    );
+
+    if (index === -1) {
+      this.jobs.push(job);
+      return;
+    }
+
+    this.jobs[index] = job;
+  }
+
+  private replaceAttempt(attempt: JobAttemptRecord): void {
+    const index = this.attempts.findIndex(
+      (candidate) =>
+        candidate.tenantId === attempt.tenantId &&
+        candidate.projectId === attempt.projectId &&
+        candidate.id === attempt.id,
+    );
+
+    if (index === -1) {
+      this.attempts.push(attempt);
+      return;
+    }
+
+    this.attempts[index] = attempt;
+  }
+
+  private replaceLease(lease: JobLeaseRecord): void {
+    const index = this.leases.findIndex(
+      (candidate) =>
+        candidate.tenantId === lease.tenantId &&
+        candidate.projectId === lease.projectId &&
+        candidate.id === lease.id,
+    );
+
+    if (index === -1) {
+      this.leases.push(lease);
+      return;
+    }
+
+    this.leases[index] = lease;
   }
 }
 
@@ -360,14 +673,293 @@ export class KyselyJobRepository implements JobRepository {
 
     return rows.map(toJobRecord);
   }
+
+  async claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null> {
+    return this.db.transaction().execute(async (transaction) => {
+      const job = await transaction
+        .selectFrom('jobs')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('state', 'in', ['queued', 'retrying'])
+        .where('ready_at', '<=', input.now)
+        .where((builder) => builder('attempt_count', '<', builder.ref('max_attempts')))
+        .orderBy('priority', 'desc')
+        .orderBy('ready_at', 'asc')
+        .orderBy('created_at', 'asc')
+        .limit(1)
+        .forUpdate()
+        .skipLocked()
+        .executeTakeFirst();
+
+      if (job === undefined) {
+        return null;
+      }
+
+      const updatedJob = await transaction
+        .updateTable('jobs')
+        .set({
+          state: 'running',
+          attempt_count: job.attempt_count + 1,
+          updated_at: input.now,
+          finished_at: null,
+        })
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', job.id)
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const attempt = await transaction
+        .insertInto('job_attempts')
+        .values({
+          id: input.attemptId,
+          tenant_id: input.tenantId,
+          project_id: input.projectId,
+          job_id: job.id,
+          attempt_number: updatedJob.attempt_count,
+          state: 'running',
+          agent_id: input.agentId,
+          started_at: input.now,
+          finished_at: null,
+          failure_code: null,
+          failure_message: null,
+          created_at: input.now,
+          updated_at: input.now,
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const lease = await transaction
+        .insertInto('job_leases')
+        .values({
+          id: input.leaseId,
+          tenant_id: input.tenantId,
+          project_id: input.projectId,
+          job_id: job.id,
+          attempt_id: attempt.id,
+          agent_id: input.agentId,
+          state: 'active',
+          acquired_at: input.now,
+          expires_at: input.leaseExpiresAt,
+          last_heartbeat_at: input.now,
+          released_at: null,
+          expired_at: null,
+          canceled_at: null,
+          created_at: input.now,
+          updated_at: input.now,
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+
+      return {
+        job: toJobRecord(updatedJob),
+        attempt: toJobAttemptRecord(attempt),
+        lease: toJobLeaseRecord(lease),
+      };
+    });
+  }
+
+  async heartbeatLease(input: JobRepositoryHeartbeatInput): Promise<JobLeaseRecord | null> {
+    return this.db.transaction().execute(async (transaction) => {
+      const lease = await transaction
+        .selectFrom('job_leases')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('job_id', '=', input.jobId)
+        .where('id', '=', input.leaseId)
+        .where('agent_id', '=', input.agentId)
+        .where('state', '=', 'active')
+        .where('expires_at', '>', input.now)
+        .forUpdate()
+        .executeTakeFirst();
+
+      if (lease === undefined) {
+        return null;
+      }
+
+      const extendedExpiresAt = maxDate(toDate(lease.expires_at), input.leaseExpiresAt);
+      const updatedLease = await transaction
+        .updateTable('job_leases')
+        .set({
+          expires_at: extendedExpiresAt,
+          last_heartbeat_at: input.now,
+          updated_at: input.now,
+        })
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.leaseId)
+        .where('state', '=', 'active')
+        .returningAll()
+        .executeTakeFirst();
+
+      return updatedLease === undefined ? null : toJobLeaseRecord(updatedLease);
+    });
+  }
+
+  async expireLeases(input: JobRepositoryExpireLeasesInput): Promise<ExpiredLeaseResult[]> {
+    return this.db.transaction().execute(async (transaction) => {
+      const leases = await transaction
+        .selectFrom('job_leases')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('state', '=', 'active')
+        .where('expires_at', '<=', input.now)
+        .orderBy('expires_at', 'asc')
+        .limit(input.limit)
+        .forUpdate()
+        .skipLocked()
+        .execute();
+      const expired: ExpiredLeaseResult[] = [];
+
+      for (const lease of leases) {
+        const attempt = await transaction
+          .selectFrom('job_attempts')
+          .selectAll()
+          .where('tenant_id', '=', lease.tenant_id)
+          .where('project_id', '=', lease.project_id)
+          .where('job_id', '=', lease.job_id)
+          .where('id', '=', lease.attempt_id)
+          .where('state', '=', 'running')
+          .forUpdate()
+          .executeTakeFirst();
+        const job = await transaction
+          .selectFrom('jobs')
+          .selectAll()
+          .where('tenant_id', '=', lease.tenant_id)
+          .where('project_id', '=', lease.project_id)
+          .where('id', '=', lease.job_id)
+          .where('state', '=', 'running')
+          .forUpdate()
+          .executeTakeFirst();
+
+        if (attempt === undefined || job === undefined) {
+          continue;
+        }
+
+        const updatedLease = await transaction
+          .updateTable('job_leases')
+          .set({
+            state: 'expired',
+            expired_at: input.now,
+            updated_at: input.now,
+          })
+          .where('tenant_id', '=', lease.tenant_id)
+          .where('project_id', '=', lease.project_id)
+          .where('id', '=', lease.id)
+          .where('state', '=', 'active')
+          .returningAll()
+          .executeTakeFirst();
+        const updatedAttempt = await transaction
+          .updateTable('job_attempts')
+          .set({
+            state: 'expired',
+            finished_at: input.now,
+            updated_at: input.now,
+          })
+          .where('tenant_id', '=', attempt.tenant_id)
+          .where('project_id', '=', attempt.project_id)
+          .where('id', '=', attempt.id)
+          .where('state', '=', 'running')
+          .returningAll()
+          .executeTakeFirst();
+        const exhaustedAttempts = job.attempt_count >= job.max_attempts;
+        const updatedJob = await transaction
+          .updateTable('jobs')
+          .set({
+            state: exhaustedAttempts ? 'failed' : 'retrying',
+            ready_at: input.now,
+            updated_at: input.now,
+            finished_at: exhaustedAttempts ? input.now : null,
+          })
+          .where('tenant_id', '=', job.tenant_id)
+          .where('project_id', '=', job.project_id)
+          .where('id', '=', job.id)
+          .where('state', '=', 'running')
+          .returningAll()
+          .executeTakeFirst();
+
+        if (
+          updatedLease === undefined ||
+          updatedAttempt === undefined ||
+          updatedJob === undefined
+        ) {
+          continue;
+        }
+
+        expired.push({
+          job: toJobRecord(updatedJob),
+          attempt: toJobAttemptRecord(updatedAttempt),
+          lease: toJobLeaseRecord(updatedLease),
+        });
+      }
+
+      return expired;
+    });
+  }
 }
 
 export function getRuntimeEventTopic(): string {
   return runtimeEventTopic;
 }
 
+function getAgentIdForClaim(authContext: AuthContext): string {
+  if (authContext.principal.type !== 'agent_token') {
+    throw new AgentClaimRequiredError();
+  }
+
+  return authContext.principal.id;
+}
+
+function calculateLeaseExpiresAt(
+  request: ClaimJobRequest | HeartbeatLeaseRequest,
+  timestamp: Date,
+): Date {
+  const leaseTtlSeconds = request.leaseTtlSeconds ?? defaultLeaseTtlSeconds;
+
+  if (
+    !Number.isInteger(leaseTtlSeconds) ||
+    leaseTtlSeconds <= 0 ||
+    leaseTtlSeconds > maxLeaseTtlSeconds
+  ) {
+    throw new Error('leaseTtlSeconds must be a positive integer no greater than 86400.');
+  }
+
+  return new Date(timestamp.getTime() + leaseTtlSeconds * 1000);
+}
+
+function normalizeLimit(limit: number | undefined): number {
+  if (limit === undefined) {
+    return defaultExpiredLeaseLimit;
+  }
+
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new Error('limit must be a positive integer.');
+  }
+
+  return limit;
+}
+
 function isReady(job: JobRecord, now: Date): boolean {
-  return job.state === 'queued' && Date.parse(job.readyAt) <= now.getTime();
+  return (
+    (job.state === 'queued' || job.state === 'retrying') &&
+    job.attemptCount < job.maxAttempts &&
+    Date.parse(job.readyAt) <= now.getTime()
+  );
+}
+
+function compareClaimableJobs(left: JobRecord, right: JobRecord): number {
+  if (left.priority !== right.priority) {
+    return right.priority - left.priority;
+  }
+
+  const readyAtDelta = Date.parse(left.readyAt) - Date.parse(right.readyAt);
+
+  if (readyAtDelta !== 0) {
+    return readyAtDelta;
+  }
+
+  return Date.parse(left.createdAt) - Date.parse(right.createdAt);
 }
 
 function toJobRow(job: JobRecord) {
@@ -408,6 +1000,40 @@ function toJobRecord(row: Selectable<HelixDatabase['jobs']>): JobRecord {
   };
 }
 
+function toJobAttemptRecord(row: Selectable<HelixDatabase['job_attempts']>): JobAttemptRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    jobId: row.job_id,
+    attemptNumber: row.attempt_number,
+    state: row.state,
+    agentId: row.agent_id,
+    startedAt: toIsoString(row.started_at),
+    finishedAt: row.finished_at === null ? null : toIsoString(row.finished_at),
+    failureCode: row.failure_code,
+    failureMessage: row.failure_message,
+  };
+}
+
+function toJobLeaseRecord(row: Selectable<HelixDatabase['job_leases']>): JobLeaseRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    jobId: row.job_id,
+    attemptId: row.attempt_id,
+    agentId: row.agent_id,
+    state: row.state,
+    acquiredAt: toIsoString(row.acquired_at),
+    expiresAt: toIsoString(row.expires_at),
+    lastHeartbeatAt: toIsoString(row.last_heartbeat_at),
+    releasedAt: row.released_at === null ? null : toIsoString(row.released_at),
+    expiredAt: row.expired_at === null ? null : toIsoString(row.expired_at),
+    canceledAt: row.canceled_at === null ? null : toIsoString(row.canceled_at),
+  };
+}
+
 function toRuntimeEventRow(event: RuntimeEventRecord) {
   return {
     id: event.id,
@@ -440,8 +1066,16 @@ function toRuntimeOutboxRow(outbox: RuntimeOutboxRecord) {
   };
 }
 
+function toDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
+}
+
 function toIsoString(value: Date | string): string {
-  return value instanceof Date ? value.toISOString() : value;
+  return toDate(value).toISOString();
+}
+
+function maxDate(left: Date, right: Date): Date {
+  return left.getTime() >= right.getTime() ? left : right;
 }
 
 function assertNonBlank(value: string, field: string): void {

@@ -12,7 +12,11 @@ import {
   customRoleSchema,
   errorEnvelopeSchema,
   eventEnvelopeSchema,
+  claimJobRequestSchema,
+  claimJobResponseSchema,
   createJobRequestSchema,
+  heartbeatLeaseRequestSchema,
+  heartbeatLeaseResponseSchema,
   idempotencyKeySchema,
   idempotencyKeyScopeSchema,
   jobAttemptRecordSchema,
@@ -207,9 +211,45 @@ describe('job execution contracts', () => {
       metadata: { source: 'sdk' },
     };
 
+    const attempt = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3b91',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: job.id,
+      attemptNumber: 1,
+      state: 'running',
+      agentId: '01890f42-98c4-7cc3-aa5e-0c567f1d3b92',
+      startedAt: '2026-05-12T19:01:00.000Z',
+      finishedAt: null,
+      failureCode: null,
+      failureMessage: null,
+    };
+    const lease = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3b93',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: job.id,
+      attemptId: attempt.id,
+      agentId: attempt.agentId,
+      state: 'active',
+      acquiredAt: '2026-05-12T19:01:00.000Z',
+      expiresAt: '2026-05-12T19:06:00.000Z',
+      lastHeartbeatAt: '2026-05-12T19:02:00.000Z',
+      releasedAt: null,
+      expiredAt: null,
+      canceledAt: null,
+    };
+
     expect(createJobRequestSchema.parse(createRequest)).toEqual(createRequest);
+    expect(claimJobRequestSchema.parse({ leaseTtlSeconds: 600 })).toEqual({ leaseTtlSeconds: 600 });
+    expect(heartbeatLeaseRequestSchema.parse({ leaseTtlSeconds: 300 })).toEqual({ leaseTtlSeconds: 300 });
     expect(jobResponseSchema.parse({ job, ready: true })).toEqual({ job, ready: true });
     expect(jobListResponseSchema.parse({ jobs: [job] })).toEqual({ jobs: [job] });
+    expect(claimJobResponseSchema.parse({ claim: { job, attempt, lease } })).toEqual({
+      claim: { job, attempt, lease },
+    });
+    expect(claimJobResponseSchema.parse({ claim: null })).toEqual({ claim: null });
+    expect(heartbeatLeaseResponseSchema.parse({ lease })).toEqual({ lease });
     expect(
       jobCreatedEventPayloadSchema.parse({
         tenantId: validTenantId,
@@ -241,6 +281,8 @@ describe('job execution contracts', () => {
       readyAt: job.readyAt,
     });
     expect(() => createJobRequestSchema.parse({ priority: -1 })).toThrow();
+    expect(() => claimJobRequestSchema.parse({ leaseTtlSeconds: 0 })).toThrow();
+    expect(() => heartbeatLeaseRequestSchema.parse({ leaseTtlSeconds: 86_401 })).toThrow();
     expect(() => createJobRequestSchema.parse({ rawPayload: 'not allowed' })).toThrow();
   });
 });

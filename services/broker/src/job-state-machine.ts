@@ -35,7 +35,7 @@ const terminalLeaseStates: ReadonlySet<LeaseState> = new Set(['released', 'expir
 const legalJobTransitions: Record<JobState, readonly JobState[]> = {
   queued: ['running', 'canceled'],
   running: ['completed', 'retrying', 'failed', 'dead_lettered', 'canceled'],
-  retrying: ['queued', 'dead_lettered', 'canceled'],
+  retrying: ['queued', 'running', 'dead_lettered', 'canceled'],
   completed: [],
   failed: [],
   dead_lettered: [],

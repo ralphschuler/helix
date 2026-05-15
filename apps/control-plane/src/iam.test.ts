@@ -480,7 +480,7 @@ describe('agent credential and token internals', () => {
       projectId,
       principal: {
         type: 'agent_token',
-        id: issuedToken.tokenId,
+        id: registered.id,
       },
       permissions: ['agents:claim'],
     });
