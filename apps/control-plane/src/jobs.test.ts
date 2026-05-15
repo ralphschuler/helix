@@ -113,6 +113,18 @@ function createJobsApp(
   return { app, repository, service };
 }
 
+function cloneJobRepository(repository: InMemoryJobRepository): InMemoryJobRepository {
+  const clone = new InMemoryJobRepository();
+
+  clone.jobs.push(...repository.jobs.map((job) => ({ ...job })));
+  clone.attempts.push(...repository.attempts.map((attempt) => ({ ...attempt })));
+  clone.leases.push(...repository.leases.map((lease) => ({ ...lease })));
+  clone.runtimeEvents.push(...repository.runtimeEvents.map((event) => ({ ...event })));
+  clone.runtimeOutbox.push(...repository.runtimeOutbox.map((outbox) => ({ ...outbox })));
+
+  return clone;
+}
+
 describe('job API', () => {
   it('creates a ready job once per idempotency key through the public API', async () => {
     const { app, repository } = createJobsApp();
@@ -1147,6 +1159,145 @@ describe('job API', () => {
         lastHeartbeatAt: '2026-05-15T13:03:00.000Z',
       },
     });
+  });
+
+  it('requeues a heartbeated claim after broker restart observes stopped heartbeat expiry', async () => {
+    const repository = new InMemoryJobRepository();
+    const producerApp = createJobsApp(projectAuth, repository).app;
+    await producerApp.request('/api/v1/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+        'idempotency-key': 'create-job:stopped-heartbeat-expiry-test',
+      },
+      body: JSON.stringify({
+        maxAttempts: 2,
+        metadata: { source: 'stopped-heartbeat-expiry-test' },
+      }),
+    });
+    const claimApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d81',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d82',
+      ],
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+    }).app;
+    const claimResponse = await claimApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ leaseTtlSeconds: 60 }),
+    });
+    const claimBody = claimJobResponseSchema.parse(await claimResponse.json());
+
+    if (claimBody.claim === null) {
+      throw new Error('Expected a claimed job.');
+    }
+
+    const heartbeatApp = createJobsApp(agentAuth, repository, {
+      ids: [],
+      now: () => new Date('2026-05-15T13:00:30.000Z'),
+    }).app;
+    const heartbeatResponse = await heartbeatApp.request(
+      `/api/v1/jobs/${claimBody.claim.job.id}/leases/${claimBody.claim.lease.id}/heartbeat`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer valid-project-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ leaseTtlSeconds: 60 }),
+      },
+    );
+
+    expect(heartbeatLeaseResponseSchema.parse(await heartbeatResponse.json())).toMatchObject({
+      lease: {
+        id: claimBody.claim.lease.id,
+        state: 'active',
+        expiresAt: '2026-05-15T13:01:30.000Z',
+        lastHeartbeatAt: '2026-05-15T13:00:30.000Z',
+      },
+    });
+
+    const reloadedRepository = cloneJobRepository(repository);
+    const restartedBrokerService = createJobsApp(agentAuth, reloadedRepository, {
+      ids: [],
+      now: () => new Date('2026-05-15T13:02:00.000Z'),
+    }).service;
+    const expired = await restartedBrokerService.expireLeases({ tenantId, projectId, limit: 10 });
+
+    expect(repository.leases[0]).toMatchObject({ state: 'active' });
+    expect(expired).toHaveLength(1);
+    expect(expired[0]).toMatchObject({
+      job: {
+        id: claimBody.claim.job.id,
+        state: 'retrying',
+        attemptCount: 1,
+        readyAt: '2026-05-15T13:02:00.000Z',
+      },
+      attempt: {
+        id: claimBody.claim.attempt.id,
+        state: 'expired',
+        finishedAt: '2026-05-15T13:02:00.000Z',
+      },
+      lease: {
+        id: claimBody.claim.lease.id,
+        state: 'expired',
+        lastHeartbeatAt: '2026-05-15T13:00:30.000Z',
+        expiredAt: '2026-05-15T13:02:00.000Z',
+      },
+    });
+
+    const reclaimApp = createJobsApp(otherAgentAuth, reloadedRepository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d83',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d84',
+      ],
+      now: () => new Date('2026-05-15T13:03:00.000Z'),
+    }).app;
+    const reclaimResponse = await reclaimApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ leaseTtlSeconds: 300 }),
+    });
+    const reclaimBody = claimJobResponseSchema.parse(await reclaimResponse.json());
+
+    if (reclaimBody.claim === null) {
+      throw new Error('Expected heartbeated expired job to be claimable again.');
+    }
+
+    const historyApp = createJobsApp(projectAuth, reloadedRepository).app;
+    const historyResponse = await historyApp.request(
+      `/api/v1/jobs/${claimBody.claim.job.id}/history`,
+      {
+        headers: { authorization: 'Bearer valid-project-token' },
+      },
+    );
+    const history = jobHistoryResponseSchema.parse(await historyResponse.json());
+
+    expect(reclaimBody.claim).toMatchObject({
+      job: { id: claimBody.claim.job.id, state: 'running', attemptCount: 2 },
+      attempt: {
+        id: '01890f42-98c4-7cc3-aa5e-0c567f1d3d83',
+        attemptNumber: 2,
+        state: 'running',
+      },
+      lease: { id: '01890f42-98c4-7cc3-aa5e-0c567f1d3d84', state: 'active' },
+    });
+    expect(history.attempts).toEqual([
+      expect.objectContaining({ id: claimBody.claim.attempt.id, state: 'expired' }),
+      expect.objectContaining({ id: reclaimBody.claim.attempt.id, state: 'running' }),
+    ]);
+    expect(history.leases).toEqual([
+      expect.objectContaining({ id: claimBody.claim.lease.id, state: 'expired' }),
+      expect.objectContaining({ id: reclaimBody.claim.lease.id, state: 'active' }),
+    ]);
   });
 
   it('expires active leases into retryable persisted state without in-memory ownership', async () => {

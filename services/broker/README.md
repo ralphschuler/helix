@@ -8,10 +8,28 @@ Current foundation:
 - `src/job-state-machine.ts` rejects illegal job, attempt, and lease transitions before persistence code mutates authoritative Postgres state.
 - Durable broker rows are owned by the control-plane migration `0006_job_attempt_lease_schema.sql` until service-backed repositories land.
 - Runtime retry policy uses `maxAttempts`: non-exhausted failures/expired leases return to `retrying`; exhausted failures/expired leases move the job to `dead_lettered` and keep attempt/lease rows inspectable.
+- `runBrokerServiceLoop` provides the lease-expiry worker loop. It calls the host `expireLeases` service with tenant/project scope, caps batch size, polls quickly after work, backs off when idle, backs off after errors, and stops through `AbortSignal`.
 
-Validation:
+Run/validation commands:
 
 ```sh
+# Broker loop and state-machine behavior
 yarn workspace @helix/broker test
+
+# Crash/requeue simulation: processor claims, heartbeats, stops, lease expires, job requeues
+yarn workspace @helix/control-plane test -- jobs.test.ts
+
+# Durable job/lease schema coverage
 yarn workspace @helix/control-plane test -- src/db/migrations.test.ts src/db/job-attempt-lease-schema.test.ts
+```
+
+Host the loop from the service process that owns a `JobService`/repository instance:
+
+```ts
+await runBrokerServiceLoop({
+  tenantId,
+  projectId,
+  expireLeases: (input) => jobService.expireLeases(input),
+  signal,
+});
 ```
