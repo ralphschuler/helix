@@ -1,7 +1,18 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { pbkdf2Sync, randomBytes, timingSafeEqual } from 'node:crypto';
+
+const TOKEN_SECRET_PEPPER = process.env.TOKEN_SECRET_PEPPER ?? 'control-plane-token-secret-pepper';
+const TOKEN_SECRET_PBKDF2_ITERATIONS = 210_000;
+const TOKEN_SECRET_PBKDF2_KEYLEN = 32;
+const TOKEN_SECRET_PBKDF2_DIGEST = 'sha256';
 
 export function sha256Hex(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
+  return pbkdf2Sync(
+    value,
+    TOKEN_SECRET_PEPPER,
+    TOKEN_SECRET_PBKDF2_ITERATIONS,
+    TOKEN_SECRET_PBKDF2_KEYLEN,
+    TOKEN_SECRET_PBKDF2_DIGEST,
+  ).toString('hex');
 }
 
 export function timingSafeEqualHex(left: string, right: string): boolean {
