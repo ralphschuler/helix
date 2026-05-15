@@ -48,6 +48,7 @@ import {
   type JobService,
 } from '../features/jobs/job-service.js';
 import {
+  WorkflowGraphValidationError,
   WorkflowRunIdempotencyConflictError,
   WorkflowVersionNotFoundError,
   type WorkflowService,
@@ -1218,6 +1219,10 @@ function handleWorkflowApiError(
 
   if (error instanceof WorkflowRunIdempotencyConflictError) {
     return context.json({ error: 'idempotency_conflict' }, 409);
+  }
+
+  if (error instanceof WorkflowGraphValidationError) {
+    return context.json({ error: 'invalid_workflow_graph', details: error.details }, 400);
   }
 
   throw error;

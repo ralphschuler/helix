@@ -160,6 +160,136 @@ describe('workflow API', () => {
     });
   });
 
+  it('publishes a valid static fan-out fan-in workflow DAG', async () => {
+    const { app } = createWorkflowsApp();
+    const graph = {
+      nodes: [
+        { id: 'start', type: 'job' },
+        { id: 'branch-a', type: 'job' },
+        { id: 'branch-b', type: 'timer' },
+        { id: 'join', type: 'join' },
+        { id: 'done', type: 'completion' },
+      ],
+      edges: [
+        { from: 'start', to: 'branch-a' },
+        { from: 'start', to: 'branch-b' },
+        { from: 'branch-a', to: 'join' },
+        { from: 'branch-b', to: 'join' },
+        { from: 'join', to: 'done' },
+      ],
+    };
+    const createdResponse = await app.request('/api/v1/workflows', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ slug: 'fan-in-valid', name: 'Fan In Valid', draftGraph: graph }),
+    });
+    const workflow = workflowResponseSchema.parse(await createdResponse.json()).workflow;
+
+    const publishedResponse = await app.request(`/api/v1/workflows/${workflow.id}/publish`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
+
+    expect(publishedResponse.status).toBe(201);
+    expect(workflowVersionResponseSchema.parse(await publishedResponse.json()).version.graph).toEqual(graph);
+  });
+
+  it('rejects invalid static workflow DAGs before publishing a version', async () => {
+    const invalidGraphs = [
+      {
+        name: 'cycles',
+        graph: {
+          nodes: [{ id: 'review' }, { id: 'approve' }],
+          edges: [{ from: 'review', to: 'approve' }, { from: 'approve', to: 'review' }],
+        },
+        issue: 'cycle',
+      },
+      {
+        name: 'missing dependencies',
+        graph: {
+          nodes: [{ id: 'review' }],
+          edges: [{ from: 'review', to: 'approve' }],
+        },
+        issue: 'missing node',
+      },
+      {
+        name: 'unsupported step types',
+        graph: {
+          nodes: [{ id: 'review', type: 'dynamic_runtime_step' }],
+          edges: [],
+        },
+        issue: 'unsupported step type',
+      },
+      {
+        name: 'invalid joins',
+        graph: {
+          nodes: [{ id: 'review' }, { id: 'join', type: 'join' }],
+          edges: [{ from: 'review', to: 'join' }],
+        },
+        issue: 'join step',
+      },
+    ] as const;
+
+    for (const { name, graph, issue } of invalidGraphs) {
+      const { app, repository } = createWorkflowsApp();
+      const createdResponse = await app.request('/api/v1/workflows', {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({ slug: `invalid-${name.replaceAll(' ', '-')}`, name: `Invalid ${name}`, draftGraph: graph }),
+      });
+      const workflow = workflowResponseSchema.parse(await createdResponse.json()).workflow;
+
+      const publishResponse = await app.request(`/api/v1/workflows/${workflow.id}/publish`, {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({}),
+      });
+
+      expect(publishResponse.status).toBe(400);
+      await expect(publishResponse.json()).resolves.toMatchObject({
+        error: 'invalid_workflow_graph',
+        details: expect.arrayContaining([expect.stringContaining(issue)]),
+      });
+      expect(repository.versions).toHaveLength(0);
+    }
+  });
+
+  it('rejects persisted invalid workflow version graphs before starting a run', async () => {
+    const { app, repository } = createWorkflowsApp();
+    const createdResponse = await app.request('/api/v1/workflows', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ slug: 'legacy-invalid-version', name: 'Legacy Invalid Version', draftGraph: { nodes: [{ id: 'start' }], edges: [] } }),
+    });
+    const workflow = workflowResponseSchema.parse(await createdResponse.json()).workflow;
+    repository.versions.push({
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3d90',
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      versionNumber: 1,
+      graph: { nodes: [{ id: 'start' }, { id: 'later' }], edges: [{ from: 'later', to: 'start' }, { from: 'start', to: 'later' }] },
+      metadata: {},
+      publishedAt: '2026-05-15T13:00:00.000Z',
+      createdAt: '2026-05-15T13:00:00.000Z',
+    });
+
+    const runResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs`, {
+      method: 'POST',
+      headers: { ...jsonHeaders, 'idempotency-key': 'workflow-run:invalid-version' },
+      body: JSON.stringify({}),
+    });
+
+    expect(runResponse.status).toBe(400);
+    await expect(runResponse.json()).resolves.toMatchObject({
+      error: 'invalid_workflow_graph',
+      details: expect.arrayContaining([expect.stringContaining('cycle')]),
+    });
+    expect(repository.runs).toHaveLength(0);
+    expect(repository.runtimeEvents).toHaveLength(0);
+  });
+
   it('returns workflow run status and lists only runs in the authorized project/workflow scope', async () => {
     const { app, repository } = createWorkflowsApp();
     const createdResponse = await app.request('/api/v1/workflows', {

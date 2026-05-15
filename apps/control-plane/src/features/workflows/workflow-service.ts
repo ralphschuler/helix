@@ -17,6 +17,9 @@ import type {
   RuntimeEventRecord,
   RuntimeOutboxRecord,
 } from '../runtime/transactional-outbox.js';
+import { assertValidWorkflowDag } from './workflow-dag-validator.js';
+
+export { WorkflowGraphValidationError } from './workflow-dag-validator.js';
 
 const runtimeEventTopic = 'helix.runtime.events';
 
@@ -158,6 +161,8 @@ export class WorkflowService {
       return null;
     }
 
+    assertValidWorkflowDag(workflow.draftGraph);
+
     const timestamp = this.now().toISOString();
     const version: WorkflowVersionRecord = {
       id: this.generateId(),
@@ -219,6 +224,8 @@ export class WorkflowService {
     if (version === null || version.workflowId !== input.workflowId) {
       throw new WorkflowVersionNotFoundError();
     }
+
+    assertValidWorkflowDag(version.graph);
 
     const existing = await this.repository.findRunByIdempotencyKey(input);
 
