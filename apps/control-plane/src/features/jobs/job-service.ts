@@ -7,6 +7,7 @@ import type {
   FailJobAttemptRequest,
   HeartbeatLeaseRequest,
   JobAttemptRecord,
+  JobHistoryResponse,
   JobLeaseRecord,
   JobRecord,
   TenantProjectScope,
@@ -69,6 +70,7 @@ export interface CreateJobResult {
 
 export type ClaimReadyJobResult = ClaimedJobRecord;
 export type HeartbeatLeaseResult = JobLeaseRecord;
+export type JobHistoryResult = JobHistoryResponse;
 export type ExpiredLeaseResult = ClaimedJobRecord;
 
 export interface CompleteJobAttemptResult {
@@ -143,6 +145,7 @@ export interface JobRepository {
   ): Promise<JobRepositoryCreateResult>;
   findJobById(input: GetJobInput): Promise<JobRecord | null>;
   listJobs(input: TenantProjectScope): Promise<JobRecord[]>;
+  getJobHistory(input: GetJobInput): Promise<JobHistoryResult | null>;
   claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null>;
   heartbeatLease(input: JobRepositoryHeartbeatInput): Promise<JobLeaseRecord | null>;
   completeJobAttempt(
@@ -250,6 +253,15 @@ export class JobService {
     assertProjectPermission(authContext, input, 'jobs:read');
 
     return this.repository.listJobs(input);
+  }
+
+  async getJobHistory(
+    authContext: AuthContext,
+    input: GetJobInput,
+  ): Promise<JobHistoryResult | null> {
+    assertProjectPermission(authContext, input, 'jobs:read');
+
+    return this.repository.getJobHistory(input);
   }
 
   async claimReadyJob(
@@ -542,6 +554,34 @@ export class InMemoryJobRepository implements JobRepository {
     );
   }
 
+  async getJobHistory(input: GetJobInput): Promise<JobHistoryResult | null> {
+    const job = await this.findJobById(input);
+
+    if (job === null) {
+      return null;
+    }
+
+    return {
+      job,
+      attempts: this.attempts
+        .filter(
+          (attempt) =>
+            attempt.tenantId === input.tenantId &&
+            attempt.projectId === input.projectId &&
+            attempt.jobId === input.jobId,
+        )
+        .sort((left, right) => left.attemptNumber - right.attemptNumber),
+      leases: this.leases
+        .filter(
+          (lease) =>
+            lease.tenantId === input.tenantId &&
+            lease.projectId === input.projectId &&
+            lease.jobId === input.jobId,
+        )
+        .sort(compareLeasesByAcquisition),
+    };
+  }
+
   async claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null> {
     const job = this.jobs
       .filter(
@@ -709,7 +749,7 @@ export class InMemoryJobRepository implements JobRepository {
     };
     const updatedJob: JobRecord = {
       ...records.job,
-      state: exhaustedAttempts ? 'failed' : 'retrying',
+      state: exhaustedAttempts ? 'dead_lettered' : 'retrying',
       readyAt: timestamp,
       updatedAt: timestamp,
       finishedAt: exhaustedAttempts ? timestamp : null,
@@ -774,7 +814,7 @@ export class InMemoryJobRepository implements JobRepository {
       const exhaustedAttempts = job.attemptCount >= job.maxAttempts;
       const updatedJob: JobRecord = {
         ...job,
-        state: exhaustedAttempts ? 'failed' : 'retrying',
+        state: exhaustedAttempts ? 'dead_lettered' : 'retrying',
         readyAt: input.now.toISOString(),
         updatedAt: input.now.toISOString(),
         finishedAt: exhaustedAttempts ? input.now.toISOString() : null,
@@ -973,6 +1013,46 @@ export class KyselyJobRepository implements JobRepository {
       .execute();
 
     return rows.map(toJobRecord);
+  }
+
+  async getJobHistory(input: GetJobInput): Promise<JobHistoryResult | null> {
+    return this.db.transaction().execute(async (transaction) => {
+      const job = await transaction
+        .selectFrom('jobs')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.jobId)
+        .executeTakeFirst();
+
+      if (job === undefined) {
+        return null;
+      }
+
+      const attempts = await transaction
+        .selectFrom('job_attempts')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('job_id', '=', input.jobId)
+        .orderBy('attempt_number', 'asc')
+        .execute();
+      const leases = await transaction
+        .selectFrom('job_leases')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('job_id', '=', input.jobId)
+        .orderBy('acquired_at', 'asc')
+        .orderBy('id', 'asc')
+        .execute();
+
+      return {
+        job: toJobRecord(job),
+        attempts: attempts.map(toJobAttemptRecord),
+        leases: leases.map(toJobLeaseRecord),
+      };
+    });
   }
 
   async claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null> {
@@ -1300,7 +1380,7 @@ export class KyselyJobRepository implements JobRepository {
       const updatedJob = await transaction
         .updateTable('jobs')
         .set({
-          state: exhaustedAttempts ? 'failed' : 'retrying',
+          state: exhaustedAttempts ? 'dead_lettered' : 'retrying',
           ready_at: input.now,
           updated_at: input.now,
           finished_at: exhaustedAttempts ? input.now : null,
@@ -1402,7 +1482,7 @@ export class KyselyJobRepository implements JobRepository {
         const updatedJob = await transaction
           .updateTable('jobs')
           .set({
-            state: exhaustedAttempts ? 'failed' : 'retrying',
+            state: exhaustedAttempts ? 'dead_lettered' : 'retrying',
             ready_at: input.now,
             updated_at: input.now,
             finished_at: exhaustedAttempts ? input.now : null,
@@ -1497,6 +1577,16 @@ function compareClaimableJobs(left: JobRecord, right: JobRecord): number {
   return Date.parse(left.createdAt) - Date.parse(right.createdAt);
 }
 
+function compareLeasesByAcquisition(left: JobLeaseRecord, right: JobLeaseRecord): number {
+  const acquiredAtDelta = Date.parse(left.acquiredAt) - Date.parse(right.acquiredAt);
+
+  if (acquiredAtDelta !== 0) {
+    return acquiredAtDelta;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
 function isCompleteDuplicate(records: ClaimedJobRecord): boolean {
   return (
     records.job.state === 'completed' &&
@@ -1515,7 +1605,14 @@ function canFinishRunningAttempt(records: ClaimedJobRecord, now: Date): boolean 
 }
 
 function isFailDuplicate(records: ClaimedJobRecord): boolean {
-  return records.attempt.state === 'failed' && records.lease.state === 'released';
+  return (
+    records.attempt.state === 'failed' &&
+    records.lease.state === 'released' &&
+    (records.job.state === 'retrying' ||
+      records.job.state === 'failed' ||
+      records.job.state === 'dead_lettered') &&
+    records.job.attemptCount === records.attempt.attemptNumber
+  );
 }
 
 function toJobRow(job: JobRecord) {

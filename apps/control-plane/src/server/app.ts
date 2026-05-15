@@ -411,6 +411,35 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     }
   });
 
+  app.get('/api/v1/jobs/:jobId/history', async (context) => {
+    if (jobService === undefined) {
+      return context.json({ error: 'job_service_not_configured' }, 503);
+    }
+
+    const jobId = uuidV7Schema.safeParse(context.req.param('jobId'));
+
+    if (!jobId.success) {
+      return context.json({ error: 'invalid_job_id' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const history = await jobService.getJobHistory(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        jobId: jobId.data,
+      });
+
+      if (history === null) {
+        return context.json({ error: 'job_not_found' }, 404);
+      }
+
+      return context.json(history);
+    } catch (error) {
+      return handleJobApiError(context, error);
+    }
+  });
+
   app.get('/api/v1/jobs/:jobId', async (context) => {
     if (jobService === undefined) {
       return context.json({ error: 'job_service_not_configured' }, 503);

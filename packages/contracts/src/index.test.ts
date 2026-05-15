@@ -28,6 +28,7 @@ import {
   jobCompletedEventPayloadSchema,
   jobCreatedEventPayloadSchema,
   jobLeaseRecordSchema,
+  jobHistoryResponseSchema,
   jobListResponseSchema,
   jobReadyEventPayloadSchema,
   jobRecordSchema,
@@ -251,6 +252,11 @@ describe('job execution contracts', () => {
     expect(heartbeatLeaseRequestSchema.parse({ leaseTtlSeconds: 300 })).toEqual({ leaseTtlSeconds: 300 });
     expect(jobResponseSchema.parse({ job, ready: true })).toEqual({ job, ready: true });
     expect(jobListResponseSchema.parse({ jobs: [job] })).toEqual({ jobs: [job] });
+    expect(jobHistoryResponseSchema.parse({ job, attempts: [attempt], leases: [lease] })).toEqual({
+      job,
+      attempts: [attempt],
+      leases: [lease],
+    });
     expect(claimJobResponseSchema.parse({ claim: { job, attempt, lease } })).toEqual({
       claim: { job, attempt, lease },
     });

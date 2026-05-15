@@ -8,7 +8,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build && vite build --ssr src/entry-server.tsx --outDir dist/server --emptyOutDir false",
     "db:migrate": "node src/db/migrate-cli.ts",
-    "test": "vitest run --passWithNoTests --config ../../vitest.config.ts --dir .",
+    "test": "yarn workspace @helix/contracts build && vitest run --passWithNoTests --config ../../vitest.config.ts --dir .",
     "lint": "eslint . --max-warnings 0"
   },
   "type": "module",

@@ -5,7 +5,7 @@
   "description": "Broker, job, attempt, lease, and routing service shell.",
   "scripts": {
     "check": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run --passWithNoTests --config ../../vitest.config.ts --dir .",
+    "test": "yarn workspace @helix/contracts build && vitest run --passWithNoTests --config ../../vitest.config.ts --dir .",
     "lint": "eslint . --max-warnings 0"
   },
   "type": "module",
