@@ -547,7 +547,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
         request: request.data,
       });
 
-      return context.json({ claim });
+      return context.json(claim);
     } catch (error) {
       return handleJobApiError(context, error);
     }

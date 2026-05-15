@@ -14,6 +14,8 @@ import {
   eventEnvelopeSchema,
   claimJobRequestSchema,
   claimJobResponseSchema,
+  jobClaimedEventPayloadSchema,
+  jobClaimRejectedEventPayloadSchema,
   completeJobAttemptRequestSchema,
   completeJobAttemptResponseSchema,
   createJobRequestSchema,
@@ -340,6 +342,24 @@ describe('job execution contracts', () => {
       claim: { job, attempt, lease },
     });
     expect(claimJobResponseSchema.parse({ claim: null })).toEqual({ claim: null });
+    expect(
+      claimJobResponseSchema.parse({
+        claim: null,
+        rejection: {
+          reason: 'routing_constraints_unmatched',
+          jobId: job.id,
+          processorId: '01890f42-98c4-7cc3-aa5e-0c567f1d3b94',
+          agentId: lease.agentId,
+          explanation: {
+            eligible: false,
+            reasons: [],
+            matchedCapabilities: [],
+            rejectedConstraints: ['capability thumbnail unavailable'],
+            metadata: { constraintKeys: ['capability'] },
+          },
+        },
+      }),
+    ).toMatchObject({ rejection: { reason: 'routing_constraints_unmatched', jobId: job.id } });
     const completedJob = {
       ...job,
       state: 'completed',
@@ -369,6 +389,43 @@ describe('job execution contracts', () => {
       transition: { job: completedJob, attempt: completedAttempt, lease: releasedLease },
       duplicate: false,
     });
+    expect(
+      jobClaimedEventPayloadSchema.parse({
+        tenantId: validTenantId,
+        projectId: validProjectId,
+        jobId: job.id,
+        attemptId: attempt.id,
+        leaseId: lease.id,
+        agentId: lease.agentId,
+        claimedAt: '2026-05-12T19:01:00.000Z',
+      }),
+    ).toEqual({
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: job.id,
+      attemptId: attempt.id,
+      leaseId: lease.id,
+      agentId: lease.agentId,
+      claimedAt: '2026-05-12T19:01:00.000Z',
+    });
+    expect(
+      jobClaimRejectedEventPayloadSchema.parse({
+        tenantId: validTenantId,
+        projectId: validProjectId,
+        jobId: job.id,
+        processorId: '01890f42-98c4-7cc3-aa5e-0c567f1d3b94',
+        agentId: lease.agentId,
+        reason: 'routing_constraints_unmatched',
+        explanation: {
+          eligible: false,
+          reasons: [],
+          matchedCapabilities: [],
+          rejectedConstraints: ['capability thumbnail unavailable'],
+          metadata: { constraintKeys: ['capability'] },
+        },
+        rejectedAt: '2026-05-12T19:01:00.000Z',
+      }),
+    ).toMatchObject({ reason: 'routing_constraints_unmatched', jobId: job.id });
     expect(
       jobCompletedEventPayloadSchema.parse({
         tenantId: validTenantId,

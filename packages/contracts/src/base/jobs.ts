@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { idempotencyKeySchema } from './idempotency.js';
 import { uuidV7Schema } from './ids.js';
+import { routingExplanationSchema } from './processors.js';
 import { tenantProjectScopeSchema } from './scope.js';
 
 export const jobStateValues = [
@@ -189,9 +190,25 @@ export const jobHistoryResponseSchema = z
   })
   .strict();
 
+export const claimRejectionReasonSchema = z.enum([
+  'processor_not_registered',
+  'routing_constraints_unmatched',
+]);
+
+export const claimRejectionSchema = z
+  .object({
+    reason: claimRejectionReasonSchema,
+    jobId: uuidV7Schema.nullable(),
+    processorId: uuidV7Schema.nullable(),
+    agentId: uuidV7Schema,
+    explanation: routingExplanationSchema.nullable(),
+  })
+  .strict();
+
 export const claimJobResponseSchema = z
   .object({
     claim: claimedJobSchema.nullable(),
+    rejection: claimRejectionSchema.nullable().optional(),
   })
   .strict();
 
@@ -231,6 +248,27 @@ export const jobReadyEventPayloadSchema = tenantProjectScopeSchema
   })
   .strict();
 
+export const jobClaimedEventPayloadSchema = tenantProjectScopeSchema
+  .extend({
+    jobId: uuidV7Schema,
+    attemptId: uuidV7Schema,
+    leaseId: uuidV7Schema,
+    agentId: uuidV7Schema,
+    claimedAt: isoTimestampSchema,
+  })
+  .strict();
+
+export const jobClaimRejectedEventPayloadSchema = tenantProjectScopeSchema
+  .extend({
+    jobId: uuidV7Schema.nullable(),
+    processorId: uuidV7Schema.nullable(),
+    agentId: uuidV7Schema,
+    reason: claimRejectionReasonSchema,
+    explanation: routingExplanationSchema.nullable(),
+    rejectedAt: isoTimestampSchema,
+  })
+  .strict();
+
 export const jobCompletedEventPayloadSchema = tenantProjectScopeSchema
   .extend({
     jobId: uuidV7Schema,
@@ -261,6 +299,8 @@ export type JobAttemptRecord = z.infer<typeof jobAttemptRecordSchema>;
 export type JobLeaseRecord = z.infer<typeof jobLeaseRecordSchema>;
 export type CreateJobRequest = z.infer<typeof createJobRequestSchema>;
 export type ClaimJobRequest = z.infer<typeof claimJobRequestSchema>;
+export type ClaimRejectionReason = z.infer<typeof claimRejectionReasonSchema>;
+export type ClaimRejection = z.infer<typeof claimRejectionSchema>;
 export type HeartbeatLeaseRequest = z.infer<typeof heartbeatLeaseRequestSchema>;
 export type CompleteJobAttemptRequest = z.infer<typeof completeJobAttemptRequestSchema>;
 export type FailJobAttemptRequest = z.infer<typeof failJobAttemptRequestSchema>;
@@ -274,5 +314,7 @@ export type CompleteJobAttemptResponse = z.infer<typeof completeJobAttemptRespon
 export type FailJobAttemptResponse = z.infer<typeof failJobAttemptResponseSchema>;
 export type JobCreatedEventPayload = z.infer<typeof jobCreatedEventPayloadSchema>;
 export type JobReadyEventPayload = z.infer<typeof jobReadyEventPayloadSchema>;
+export type JobClaimedEventPayload = z.infer<typeof jobClaimedEventPayloadSchema>;
+export type JobClaimRejectedEventPayload = z.infer<typeof jobClaimRejectedEventPayloadSchema>;
 export type JobCompletedEventPayload = z.infer<typeof jobCompletedEventPayloadSchema>;
 export type JobAttemptFailedEventPayload = z.infer<typeof jobAttemptFailedEventPayloadSchema>;

@@ -48,15 +48,20 @@ function createDefaultAppOptions(): CreateAppOptions {
     repository: new KyselyAgentRepository(db),
   });
 
+  const processorRepository = new KyselyProcessorRegistryRepository(db);
+
   return {
     apiAuthProvider: createApiAuthProvider({
       projectApiKeyAuthenticator: projectApiKeyService,
       agentTokenAuthenticator: agentAuthService,
     }),
-    jobService: new JobService({ repository: new KyselyJobRepository(db) }),
+    jobService: new JobService({
+      repository: new KyselyJobRepository(db),
+      processorRepository,
+    }),
     processorRegistryService: new ProcessorRegistryService({
       auditSink,
-      repository: new KyselyProcessorRegistryRepository(db),
+      repository: processorRepository,
     }),
     workflowService: new WorkflowService({ repository: new KyselyWorkflowRepository(db) }),
   };
