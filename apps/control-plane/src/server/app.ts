@@ -341,6 +341,66 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     }
   });
 
+  app.get('/api/v1/workflows/:workflowId/runs', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    const workflowId = uuidV7Schema.safeParse(context.req.param('workflowId'));
+
+    if (!workflowId.success) {
+      return context.json({ error: 'invalid_workflow_id' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const runs = await workflowService.listRuns(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+      });
+
+      return context.json({ runs });
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.get('/api/v1/workflows/:workflowId/runs/:runId', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    const workflowId = uuidV7Schema.safeParse(context.req.param('workflowId'));
+    const runId = uuidV7Schema.safeParse(context.req.param('runId'));
+
+    if (!workflowId.success) {
+      return context.json({ error: 'invalid_workflow_id' }, 400);
+    }
+
+    if (!runId.success) {
+      return context.json({ error: 'invalid_workflow_run_id' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const run = await workflowService.getRun(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+        runId: runId.data,
+      });
+
+      if (run === null) {
+        return context.json({ error: 'workflow_run_not_found' }, 404);
+      }
+
+      return context.json({ run });
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
   app.post('/api/v1/workflows/:workflowId/runs', async (context) => {
     if (workflowService === undefined) {
       return context.json({ error: 'workflow_service_not_configured' }, 503);

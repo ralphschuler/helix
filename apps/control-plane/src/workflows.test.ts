@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { AuthContext } from '@helix/contracts';
 import {
   workflowResponseSchema,
+  workflowRunListResponseSchema,
   workflowRunResponseSchema,
+  workflowRunStartedEventPayloadSchema,
   workflowVersionResponseSchema,
 } from '@helix/contracts';
 
@@ -155,6 +157,89 @@ describe('workflow API', () => {
       workflowVersionId: published.version.id,
       state: 'queued',
       idempotencyKey: 'workflow-run:invoice-1',
+    });
+  });
+
+  it('returns workflow run status and lists only runs in the authorized project/workflow scope', async () => {
+    const { app, repository } = createWorkflowsApp();
+    const createdResponse = await app.request('/api/v1/workflows', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ slug: 'status-workflow', name: 'Status Workflow', draftGraph: { nodes: [{ id: 'start' }], edges: [] } }),
+    });
+    const workflow = workflowResponseSchema.parse(await createdResponse.json()).workflow;
+    await app.request(`/api/v1/workflows/${workflow.id}/publish`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
+    const runResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs`, {
+      method: 'POST',
+      headers: { ...jsonHeaders, 'idempotency-key': 'workflow-run:status-list' },
+      body: JSON.stringify({}),
+    });
+    const run = workflowRunResponseSchema.parse(await runResponse.json()).run;
+    const otherProjectApp = createWorkflowsApp({
+      ...workflowAuth,
+      tenantId: '01890f42-98c4-7cc3-8a5e-0c567f1d3a79',
+      projectId: '01890f42-98c4-7cc3-9a5e-0c567f1d3a80',
+    }, repository).app;
+
+    const statusResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs/${run.id}`, { headers: jsonHeaders });
+    const listResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs`, { headers: jsonHeaders });
+    const wrongWorkflowResponse = await app.request(`/api/v1/workflows/01890f42-98c4-7cc3-aa5e-0c567f1d3d99/runs/${run.id}`, { headers: jsonHeaders });
+    const wrongScopeListResponse = await otherProjectApp.request(`/api/v1/workflows/${workflow.id}/runs`, { headers: jsonHeaders });
+
+    expect(statusResponse.status).toBe(200);
+    expect(workflowRunResponseSchema.parse(await statusResponse.json())).toEqual({ run });
+    expect(listResponse.status).toBe(200);
+    expect(workflowRunListResponseSchema.parse(await listResponse.json())).toEqual({ runs: [run] });
+    expect(wrongWorkflowResponse.status).toBe(404);
+    expect(wrongScopeListResponse.status).toBe(200);
+    expect(workflowRunListResponseSchema.parse(await wrongScopeListResponse.json())).toEqual({ runs: [] });
+  });
+
+  it('emits one workflow run started lifecycle event for an idempotent run start', async () => {
+    const { app, repository } = createWorkflowsApp();
+    const createdResponse = await app.request('/api/v1/workflows', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ slug: 'event-workflow', name: 'Event Workflow', draftGraph: { nodes: [{ id: 'start' }], edges: [] } }),
+    });
+    const workflow = workflowResponseSchema.parse(await createdResponse.json()).workflow;
+    const publishedResponse = await app.request(`/api/v1/workflows/${workflow.id}/publish`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
+    const version = workflowVersionResponseSchema.parse(await publishedResponse.json()).version;
+    const request = {
+      method: 'POST',
+      headers: { ...jsonHeaders, 'idempotency-key': 'workflow-run:event-once' },
+      body: JSON.stringify({}),
+    } as const;
+
+    const firstRunResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs`, request);
+    const duplicateRunResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs`, request);
+    const run = workflowRunResponseSchema.parse(await firstRunResponse.json()).run;
+    workflowRunResponseSchema.parse(await duplicateRunResponse.json());
+
+    expect(firstRunResponse.status).toBe(201);
+    expect(duplicateRunResponse.status).toBe(200);
+    expect(repository.runtimeEvents).toHaveLength(1);
+    expect(repository.runtimeOutbox).toHaveLength(1);
+    expect(repository.runtimeEvents[0]?.eventType).toBe('workflow.run.started');
+    expect(repository.runtimeEvents[0]?.orderingKey).toBe(`project:${projectId}:workflow:${workflow.id}:run:${run.id}`);
+    expect(repository.runtimeOutbox[0]?.topic).toBe('helix.runtime.events');
+    expect(workflowRunStartedEventPayloadSchema.parse(repository.runtimeEvents[0]?.payload)).toEqual({
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      workflowVersionId: version.id,
+      runId: run.id,
+      state: 'queued',
+      idempotencyKey: 'workflow-run:event-once',
+      startedAt: '2026-05-15T13:00:00.000Z',
     });
   });
 
