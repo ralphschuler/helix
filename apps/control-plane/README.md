@@ -17,6 +17,7 @@ SaaS API, control-plane application, and v1 `/admin` UI shell.
 - Runtime consumer inbox helpers for event-id dedupe, retryable failed processing, and tenant/project-scoped consumption records.
 - Project API key-authenticated job API for creating/listing/statusing tenant/project-scoped jobs with idempotent creation and runtime outbox events.
 - Retry/DLQ job behavior: exhausted failed attempts or expired leases transition jobs to `dead_lettered`, while attempt and lease history remains inspectable.
+- Agent token-authenticated processor registration API for outbound processor capability updates with scoped audit events.
 
 ## Commands
 
@@ -27,6 +28,7 @@ yarn workspace @helix/control-plane db:migrate
 yarn workspace @helix/control-plane test
 # focused runtime checks:
 yarn workspace @helix/control-plane test -- jobs
+yarn workspace @helix/control-plane test -- processors
 yarn workspace @helix/control-plane test -- outbox
 yarn workspace @helix/control-plane test -- inbox
 yarn workspace @helix/control-plane check
@@ -54,6 +56,25 @@ curl http://localhost:3000/api/v1/jobs/<job-id> \
 
 curl http://localhost:3000/api/v1/jobs/<job-id>/history \
   -H 'Authorization: Bearer hpx_<prefix>.<secret>'
+```
+
+## Processor registration API
+
+Outbound agents authenticate with `Authorization: Bearer <agent-token>`. Processor registration derives tenant, project, and agent identity from the authenticated token; request bodies cannot select another scope.
+
+```sh
+curl -X POST http://localhost:3000/api/v1/processors/register \
+  -H 'Authorization: Bearer hat_<prefix>.<secret>' \
+  -H 'Content-Type: application/json' \
+  -d '{"capabilities":[{"name":"thumbnail","version":"1.2.0"}],"hardware":{"gpu":false,"memoryMb":1024},"region":"us-east-1","routingExplanation":{"eligible":true,"reasons":["registered"],"matchedCapabilities":["thumbnail"],"rejectedConstraints":[],"metadata":{}}}'
+
+curl -X PATCH http://localhost:3000/api/v1/processors/<processor-id>/capabilities \
+  -H 'Authorization: Bearer hat_<prefix>.<secret>' \
+  -H 'Content-Type: application/json' \
+  -d '{"capabilities":[{"name":"video-transcode","version":"2.0.0"}],"routingExplanation":{"eligible":true,"reasons":["updated"],"matchedCapabilities":["video-transcode"],"rejectedConstraints":[],"metadata":{}}}'
+
+curl http://localhost:3000/api/v1/processors \
+  -H 'Authorization: Bearer hat_<prefix>.<secret>'
 ```
 
 ## Runtime consumer idempotency
