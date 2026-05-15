@@ -2,6 +2,7 @@ import type { Kysely, Selectable } from 'kysely';
 import type {
   AuthContext,
   ClaimJobRequest,
+  ClaimRejection,
   ClaimedJob as ClaimedJobRecord,
   CreateJobRequest,
   FailJobAttemptRequest,
@@ -11,6 +12,7 @@ import type {
   JobLeaseRecord,
   JobRecord,
   ProcessorRegistryRecord,
+  RoutingExplanation,
   TenantProjectScope,
 } from '@helix/contracts';
 
@@ -71,7 +73,15 @@ export interface CreateJobResult {
   readonly ready: boolean;
 }
 
-export type ClaimReadyJobResult = ClaimedJobRecord;
+export interface ClaimReadyJobResult {
+  readonly claim: ClaimedJobRecord | null;
+  readonly rejection?: ClaimRejection | null;
+}
+
+export type JobRepositoryClaimResult =
+  | { readonly status: 'claimed'; readonly claim: ClaimedJobRecord }
+  | { readonly status: 'rejected'; readonly rejection: ClaimRejection }
+  | { readonly status: 'empty' };
 export type HeartbeatLeaseResult = JobLeaseRecord;
 export type JobHistoryResult = JobHistoryResponse;
 export type ExpiredLeaseResult = ClaimedJobRecord;
@@ -100,7 +110,19 @@ export interface JobRepositoryClaimInput extends TenantProjectScope {
   readonly leaseId: string;
   readonly now: Date;
   readonly leaseExpiresAt: Date;
-  readonly isEligible?: ((job: JobRecord) => boolean) | undefined;
+  readonly evaluateJob?: ((job: JobRecord) => RoutingExplanation) | undefined;
+  readonly createClaimEvents: (claim: ClaimedJobRecord) => JobRepositoryClaimEvents;
+  readonly createRejectionEvents?: ((rejection: ClaimRejection) => JobRepositoryClaimEvents) | undefined;
+}
+
+export interface JobRepositoryClaimEvents {
+  readonly events: readonly RuntimeEventRecord[];
+  readonly outbox: readonly RuntimeOutboxRecord[];
+}
+
+export interface JobRepositoryRecordClaimRejectionInput extends TenantProjectScope {
+  readonly rejection: ClaimRejection;
+  readonly events: JobRepositoryClaimEvents;
 }
 
 export interface JobRepositoryHeartbeatInput extends TenantProjectScope {
@@ -150,7 +172,8 @@ export interface JobRepository {
   findJobById(input: GetJobInput): Promise<JobRecord | null>;
   listJobs(input: TenantProjectScope): Promise<JobRecord[]>;
   getJobHistory(input: GetJobInput): Promise<JobHistoryResult | null>;
-  claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null>;
+  claimReadyJob(input: JobRepositoryClaimInput): Promise<JobRepositoryClaimResult>;
+  recordClaimRejection?(input: JobRepositoryRecordClaimRejectionInput): Promise<void>;
   heartbeatLease(input: JobRepositoryHeartbeatInput): Promise<JobLeaseRecord | null>;
   completeJobAttempt(
     input: JobRepositoryCompleteAttemptInput,
@@ -277,17 +300,30 @@ export class JobService {
   async claimReadyJob(
     authContext: AuthContext,
     input: ClaimReadyJobInput,
-  ): Promise<ClaimReadyJobResult | null> {
+  ): Promise<ClaimReadyJobResult> {
     assertProjectPermission(authContext, input, 'agents:claim');
     const timestamp = this.now();
     const agentId = getAgentIdForClaim(authContext);
     const processor = await this.findClaimingProcessor(input, agentId);
 
     if (this.processorRepository !== undefined && processor === null) {
-      return null;
+      const rejection: ClaimRejection = {
+        reason: 'processor_not_registered',
+        jobId: null,
+        processorId: null,
+        agentId,
+        explanation: null,
+      };
+      await this.repository.recordClaimRejection?.({
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        rejection,
+        events: this.createClaimRejectedEvents(input, rejection, timestamp),
+      });
+      return { claim: null, rejection };
     }
 
-    return this.repository.claimReadyJob({
+    const result = await this.repository.claimReadyJob({
       tenantId: input.tenantId,
       projectId: input.projectId,
       agentId,
@@ -295,8 +331,19 @@ export class JobService {
       leaseId: this.generateId(),
       now: timestamp,
       leaseExpiresAt: calculateLeaseExpiresAt(input.request, timestamp),
-      isEligible: processor === null ? undefined : (job) => this.routingPolicy.evaluate({ job, processor }).eligible,
+      evaluateJob: processor === null ? undefined : (job) => this.routingPolicy.evaluate({ job, processor }),
+      createClaimEvents: (claim) => this.createClaimEvents(claim, timestamp),
+      createRejectionEvents: (rejection) => this.createClaimRejectedEvents(input, rejection, timestamp),
     });
+
+    if (result.status === 'claimed') {
+      return { claim: result.claim, rejection: null };
+    }
+    if (result.status === 'rejected') {
+      return { claim: null, rejection: result.rejection };
+    }
+
+    return { claim: null };
   }
 
   async heartbeatLease(
@@ -446,6 +493,53 @@ export class JobService {
     });
   }
 
+  private createClaimEvents(claim: ClaimedJobRecord, timestamp: Date): JobRepositoryClaimEvents {
+    const event = this.createRuntimeEvent({
+      eventType: 'job.claimed',
+      tenantId: claim.job.tenantId,
+      projectId: claim.job.projectId,
+      jobId: claim.job.id,
+      payload: {
+        tenantId: claim.job.tenantId,
+        projectId: claim.job.projectId,
+        jobId: claim.job.id,
+        attemptId: claim.attempt.id,
+        leaseId: claim.lease.id,
+        agentId: claim.lease.agentId,
+        claimedAt: timestamp.toISOString(),
+      },
+      timestamp,
+    });
+
+    return { events: [event], outbox: [this.createRuntimeOutbox(event, timestamp)] };
+  }
+
+  private createClaimRejectedEvents(
+    input: TenantProjectScope,
+    rejection: ClaimRejection,
+    timestamp: Date,
+  ): JobRepositoryClaimEvents {
+    const event = this.createRuntimeEvent({
+      eventType: 'job.claim.rejected',
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: rejection.jobId ?? input.projectId,
+      payload: {
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        jobId: rejection.jobId,
+        processorId: rejection.processorId,
+        agentId: rejection.agentId,
+        reason: rejection.reason,
+        explanation: rejection.explanation,
+        rejectedAt: timestamp.toISOString(),
+      },
+      timestamp,
+    });
+
+    return { events: [event], outbox: [this.createRuntimeOutbox(event, timestamp)] };
+  }
+
   private createJobEvents(job: JobRecord, timestamp: Date): RuntimeEventRecord[] {
     const events: RuntimeEventRecord[] = [
       this.createRuntimeEvent({
@@ -495,7 +589,7 @@ export class JobService {
     readonly timestamp: Date;
   }): RuntimeEventRecord {
     return {
-      id: this.generateId(),
+      id: randomUuidV7LikeId(input.timestamp),
       tenantId: input.tenantId,
       projectId: input.projectId,
       eventType: input.eventType,
@@ -512,7 +606,7 @@ export class JobService {
     timestamp: Date,
   ): RuntimeOutboxRecord {
     return {
-      id: this.generateId(),
+      id: randomUuidV7LikeId(timestamp),
       tenantId: event.tenantId,
       projectId: event.projectId,
       eventId: event.id,
@@ -614,21 +708,39 @@ export class InMemoryJobRepository implements JobRepository {
     };
   }
 
-  async claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null> {
-    const job = this.jobs
+  async claimReadyJob(input: JobRepositoryClaimInput): Promise<JobRepositoryClaimResult> {
+    const candidates = this.jobs
       .filter(
         (candidate) =>
           candidate.tenantId === input.tenantId &&
           candidate.projectId === input.projectId &&
           isReady(candidate, input.now) &&
           candidate.attemptCount < candidate.maxAttempts &&
-          !this.hasActiveLease(candidate) &&
-          (input.isEligible === undefined || input.isEligible(candidate)),
+          !this.hasActiveLease(candidate),
       )
-      .sort(compareClaimableJobs)[0];
+      .sort(compareClaimableJobs);
+    let firstRejection: ClaimRejection | null = null;
+    const job = candidates.find((candidate) => {
+      if (input.evaluateJob === undefined) {
+        return true;
+      }
+
+      const explanation = input.evaluateJob(candidate);
+      if (explanation.eligible) {
+        return true;
+      }
+      firstRejection ??= createRoutingRejection(candidate, input.agentId, explanation);
+      return false;
+    });
 
     if (job === undefined) {
-      return null;
+      if (firstRejection !== null && input.createRejectionEvents !== undefined) {
+        const events = input.createRejectionEvents(firstRejection);
+        this.runtimeEvents.push(...events.events);
+        this.runtimeOutbox.push(...events.outbox);
+        return { status: 'rejected', rejection: firstRejection };
+      }
+      return { status: 'empty' };
     }
 
     const updatedJob: JobRecord = {
@@ -670,8 +782,17 @@ export class InMemoryJobRepository implements JobRepository {
     this.replaceJob(updatedJob);
     this.attempts.push(attempt);
     this.leases.push(lease);
+    const claim = { job: updatedJob, attempt, lease };
+    const events = input.createClaimEvents(claim);
+    this.runtimeEvents.push(...events.events);
+    this.runtimeOutbox.push(...events.outbox);
 
-    return { job: updatedJob, attempt, lease };
+    return { status: 'claimed', claim };
+  }
+
+  async recordClaimRejection(input: JobRepositoryRecordClaimRejectionInput): Promise<void> {
+    this.runtimeEvents.push(...input.events.events);
+    this.runtimeOutbox.push(...input.events.outbox);
   }
 
   async heartbeatLease(input: JobRepositoryHeartbeatInput): Promise<JobLeaseRecord | null> {
@@ -1088,7 +1209,7 @@ export class KyselyJobRepository implements JobRepository {
     });
   }
 
-  async claimReadyJob(input: JobRepositoryClaimInput): Promise<ClaimedJobRecord | null> {
+  async claimReadyJob(input: JobRepositoryClaimInput): Promise<JobRepositoryClaimResult> {
     return this.db.transaction().execute(async (transaction) => {
       const candidates = await transaction
         .selectFrom('jobs')
@@ -1101,20 +1222,37 @@ export class KyselyJobRepository implements JobRepository {
         .orderBy('priority', 'desc')
         .orderBy('ready_at', 'asc')
         .orderBy('created_at', 'asc')
-        .limit(input.isEligible === undefined ? 1 : 50)
+        .$if(input.evaluateJob === undefined, (query) => query.limit(1))
         .forUpdate()
         .skipLocked()
         .execute();
+      let firstRejection: ClaimRejection | null = null;
       const job = candidates.find((candidate) => {
-        if (input.isEligible === undefined) {
+        if (input.evaluateJob === undefined) {
           return true;
         }
 
-        return input.isEligible(toJobRecord(candidate));
+        const jobRecord = toJobRecord(candidate);
+        const explanation = input.evaluateJob(jobRecord);
+        if (explanation.eligible) {
+          return true;
+        }
+        firstRejection ??= createRoutingRejection(jobRecord, input.agentId, explanation);
+        return false;
       });
 
       if (job === undefined) {
-        return null;
+        if (firstRejection !== null && input.createRejectionEvents !== undefined) {
+          const events = input.createRejectionEvents(firstRejection);
+          for (const event of events.events) {
+            await transaction.insertInto('runtime_events').values(toRuntimeEventRow(event)).execute();
+          }
+          for (const outbox of events.outbox) {
+            await transaction.insertInto('runtime_outbox').values(toRuntimeOutboxRow(outbox)).execute();
+          }
+          return { status: 'rejected', rejection: firstRejection };
+        }
+        return { status: 'empty' };
       }
 
       const updatedJob = await transaction
@@ -1171,11 +1309,31 @@ export class KyselyJobRepository implements JobRepository {
         .returningAll()
         .executeTakeFirstOrThrow();
 
-      return {
+      const claim = {
         job: toJobRecord(updatedJob),
         attempt: toJobAttemptRecord(attempt),
         lease: toJobLeaseRecord(lease),
       };
+      const events = input.createClaimEvents(claim);
+      for (const event of events.events) {
+        await transaction.insertInto('runtime_events').values(toRuntimeEventRow(event)).execute();
+      }
+      for (const outbox of events.outbox) {
+        await transaction.insertInto('runtime_outbox').values(toRuntimeOutboxRow(outbox)).execute();
+      }
+
+      return { status: 'claimed', claim };
+    });
+  }
+
+  async recordClaimRejection(input: JobRepositoryRecordClaimRejectionInput): Promise<void> {
+    await this.db.transaction().execute(async (transaction) => {
+      for (const event of input.events.events) {
+        await transaction.insertInto('runtime_events').values(toRuntimeEventRow(event)).execute();
+      }
+      for (const outbox of input.events.outbox) {
+        await transaction.insertInto('runtime_outbox').values(toRuntimeOutboxRow(outbox)).execute();
+      }
     });
   }
 
@@ -1625,6 +1783,20 @@ function compareLeasesByAcquisition(left: JobLeaseRecord, right: JobLeaseRecord)
   }
 
   return left.id.localeCompare(right.id);
+}
+
+function createRoutingRejection(
+  job: JobRecord,
+  agentId: string,
+  explanation: RoutingExplanation,
+): ClaimRejection {
+  return {
+    reason: 'routing_constraints_unmatched',
+    jobId: job.id,
+    processorId: typeof explanation.metadata.processorId === 'string' ? explanation.metadata.processorId : null,
+    agentId,
+    explanation,
+  };
 }
 
 function isCompleteDuplicate(records: ClaimedJobRecord): boolean {

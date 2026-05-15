@@ -340,6 +340,23 @@ describe('job API', () => {
     expect(repository.jobs).toHaveLength(1);
     expect(repository.attempts).toHaveLength(1);
     expect(repository.leases).toHaveLength(1);
+    expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
+      'job.created',
+      'job.ready',
+      'job.claimed',
+    ]);
+    expect(repository.runtimeEvents[2]?.payload).toEqual({
+      tenantId,
+      projectId,
+      jobId: claimBody.claim.job.id,
+      attemptId: claimBody.claim.attempt.id,
+      leaseId: claimBody.claim.lease.id,
+      agentId,
+      claimedAt: '2026-05-15T13:00:00.000Z',
+    });
+    expect(repository.runtimeOutbox.map((outbox) => outbox.eventId)).toEqual(
+      repository.runtimeEvents.map((event) => event.id),
+    );
   });
 
   it('routes claims only to processors with matching capabilities and constraints', async () => {
@@ -425,7 +442,41 @@ describe('job API', () => {
       body: JSON.stringify({ leaseTtlSeconds: 600 }),
     });
 
-    expect(claimJobResponseSchema.parse(await rejectedClaim.json())).toEqual({ claim: null });
+    const rejectedBody = claimJobResponseSchema.parse(await rejectedClaim.json());
+    expect(rejectedBody).toMatchObject({
+      claim: null,
+      rejection: {
+        reason: 'routing_constraints_unmatched',
+        jobId: '01890f42-98c4-7cc3-aa5e-0c567f1d3c01',
+        processorId: '01890f42-98c4-7cc3-aa5e-0c567f1d3e02',
+        agentId: otherAgentId,
+        explanation: {
+          eligible: false,
+          matchedCapabilities: [],
+          rejectedConstraints: expect.arrayContaining([
+            'capability thumbnail@1.2.0 unavailable',
+            'gpu required',
+            'memoryMb 4096 required',
+            'region us-east-1 required',
+            'label tier=prod required',
+            'tag images required',
+          ]),
+          metadata: expect.objectContaining({
+            constraintKeys: expect.arrayContaining([
+              'capability',
+              'capabilityVersion',
+              'labels',
+              'minMemoryMb',
+              'region',
+              'requireGpu',
+              'tags',
+            ]),
+            processorId: '01890f42-98c4-7cc3-aa5e-0c567f1d3e02',
+            agentId: otherAgentId,
+          }),
+        },
+      },
+    });
     const acceptedBody = claimJobResponseSchema.parse(await acceptedClaim.json());
 
     expect(acceptedBody.claim).toMatchObject({
@@ -434,6 +485,87 @@ describe('job API', () => {
       lease: { agentId },
     });
     expect(repository.attempts).toHaveLength(1);
+    expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
+      'job.created',
+      'job.ready',
+      'job.claim.rejected',
+      'job.claimed',
+    ]);
+    expect(repository.runtimeEvents[2]?.payload).toMatchObject({
+      tenantId,
+      projectId,
+      jobId: '01890f42-98c4-7cc3-aa5e-0c567f1d3c01',
+      processorId: '01890f42-98c4-7cc3-aa5e-0c567f1d3e02',
+      agentId: otherAgentId,
+      reason: 'routing_constraints_unmatched',
+      rejectedAt: '2026-05-15T13:00:00.000Z',
+    });
+    expect(repository.runtimeOutbox.map((outbox) => outbox.eventId)).toEqual(
+      repository.runtimeEvents.map((event) => event.id),
+    );
+  });
+
+  it('prevents an agent registered to another project from claiming a scoped job', async () => {
+    const repository = new InMemoryJobRepository();
+    const processorRepository = new InMemoryProcessorRegistryRepository();
+    await processorRepository.upsertProcessor({
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3e03',
+      tenantId: '01890f42-98c4-7cc3-8a5e-0c567f1d3a79',
+      projectId: '01890f42-98c4-7cc3-9a5e-0c567f1d3a80',
+      agentId,
+      capabilities: [{ name: 'thumbnail', version: '1.0.0' }],
+      hardware: { gpu: false, memoryMb: 1024 },
+      region: 'us-east-1',
+      labels: {},
+      tags: [],
+      routingExplanation: {
+        eligible: true,
+        reasons: ['registered'],
+        matchedCapabilities: ['thumbnail'],
+        rejectedConstraints: [],
+        metadata: {},
+      },
+      createdAt: '2026-05-15T13:00:00.000Z',
+      updatedAt: '2026-05-15T13:00:00.000Z',
+    });
+    const producerApp = createJobsApp(projectAuth, repository).app;
+    await producerApp.request('/api/v1/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+        'idempotency-key': 'create-job:wrong-project-claim-test',
+      },
+      body: JSON.stringify({ constraints: { capability: 'thumbnail' } }),
+    });
+    const wrongProjectAgentApp = createJobsApp(agentAuth, repository, {
+      processorRepository,
+      ids: ['01890f42-98c4-7cc3-aa5e-0c567f1d3e21'],
+    }).app;
+
+    const response = await wrongProjectAgentApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: { authorization: 'Bearer valid-project-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ leaseTtlSeconds: 600 }),
+    });
+
+    expect(claimJobResponseSchema.parse(await response.json())).toMatchObject({
+      claim: null,
+      rejection: {
+        reason: 'processor_not_registered',
+        jobId: null,
+        processorId: null,
+        agentId,
+        explanation: null,
+      },
+    });
+    expect(repository.attempts).toHaveLength(0);
+    expect(repository.leases).toHaveLength(0);
+    expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
+      'job.created',
+      'job.ready',
+      'job.claim.rejected',
+    ]);
   });
 
   it('completes a claimed job once and treats duplicate completion as idempotent', async () => {
@@ -512,9 +644,10 @@ describe('job API', () => {
     expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
       'job.created',
       'job.ready',
+      'job.claimed',
       'job.completed',
     ]);
-    expect(repository.runtimeEvents[2]?.payload).toEqual({
+    expect(repository.runtimeEvents[3]?.payload).toEqual({
       tenantId,
       projectId,
       jobId: claimBody.claim.job.id,
@@ -617,9 +750,10 @@ describe('job API', () => {
     expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
       'job.created',
       'job.ready',
+      'job.claimed',
       'job.attempt.failed',
     ]);
-    expect(repository.runtimeEvents[2]?.payload).toEqual({
+    expect(repository.runtimeEvents[3]?.payload).toEqual({
       tenantId,
       projectId,
       jobId: claimBody.claim.job.id,
@@ -803,7 +937,9 @@ describe('job API', () => {
     expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
       'job.created',
       'job.ready',
+      'job.claimed',
       'job.attempt.failed',
+      'job.claimed',
       'job.attempt.failed',
     ]);
 
@@ -1037,7 +1173,9 @@ describe('job API', () => {
     expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
       'job.created',
       'job.ready',
+      'job.claimed',
       'job.attempt.failed',
+      'job.claimed',
     ]);
   });
 
@@ -1155,6 +1293,8 @@ describe('job API', () => {
     expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
       'job.created',
       'job.ready',
+      'job.claimed',
+      'job.claimed',
     ]);
   });
 
