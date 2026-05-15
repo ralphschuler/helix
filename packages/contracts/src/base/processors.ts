@@ -50,11 +50,13 @@ export const routingExplanationSchema = z
   })
   .strict();
 
+export const processorCapabilitiesSchema = z.array(processorCapabilitySchema).min(1);
+
 export const processorRegistryRecordSchema = tenantProjectScopeSchema
   .extend({
     id: uuidV7Schema,
     agentId: uuidV7Schema,
-    capabilities: z.array(processorCapabilitySchema).min(1),
+    capabilities: processorCapabilitiesSchema,
     hardware: processorHardwareSchema,
     region: nonBlankTextSchema,
     labels: processorLabelsSchema,
@@ -62,6 +64,24 @@ export const processorRegistryRecordSchema = tenantProjectScopeSchema
     routingExplanation: routingExplanationSchema,
     createdAt: isoTimestampSchema,
     updatedAt: isoTimestampSchema,
+  })
+  .strict();
+
+export const registerProcessorRequestSchema = z
+  .object({
+    capabilities: processorCapabilitiesSchema,
+    hardware: processorHardwareSchema,
+    region: nonBlankTextSchema,
+    labels: processorLabelsSchema.default({}),
+    tags: processorTagsSchema.default([]),
+    routingExplanation: routingExplanationSchema,
+  })
+  .strict();
+
+export const updateProcessorCapabilitiesRequestSchema = z
+  .object({
+    capabilities: processorCapabilitiesSchema,
+    routingExplanation: routingExplanationSchema,
   })
   .strict();
 
@@ -82,6 +102,8 @@ export type ProcessorCapability = z.infer<typeof processorCapabilitySchema>;
 export type ProcessorLabels = z.infer<typeof processorLabelsSchema>;
 export type ProcessorTags = z.infer<typeof processorTagsSchema>;
 export type RoutingExplanation = z.infer<typeof routingExplanationSchema>;
+export type RegisterProcessorRequest = z.infer<typeof registerProcessorRequestSchema>;
+export type UpdateProcessorCapabilitiesRequest = z.infer<typeof updateProcessorCapabilitiesRequestSchema>;
 export type ProcessorRegistryRecord = z.infer<typeof processorRegistryRecordSchema>;
 export type ProcessorRegistryResponse = z.infer<typeof processorRegistryResponseSchema>;
 export type ProcessorRegistryListResponse = z.infer<typeof processorRegistryListResponseSchema>;

@@ -9,7 +9,9 @@ import {
   heartbeatLeaseRequestSchema,
   idempotencyKeySchema,
   publishWorkflowRequestSchema,
+  registerProcessorRequestSchema,
   startWorkflowRunRequestSchema,
+  updateProcessorCapabilitiesRequestSchema,
   updateWorkflowDraftRequestSchema,
   uuidV7Schema,
   type AuthContext,
@@ -50,6 +52,11 @@ import {
   WorkflowVersionNotFoundError,
   type WorkflowService,
 } from '../features/workflows/workflow-service.js';
+import {
+  ProcessorAgentRequiredError,
+  ProcessorRegistrationNotFoundError,
+  type ProcessorRegistryService,
+} from '../features/processors/processor-registry.js';
 
 type AppEnvironment = {
   Variables: {
@@ -114,6 +121,7 @@ export interface CreateAppOptions {
   readonly customRoleService?: CustomRoleService;
   readonly jobService?: JobService;
   readonly workflowService?: WorkflowService;
+  readonly processorRegistryService?: ProcessorRegistryService;
 }
 
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -135,6 +143,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     });
   const jobService = options.jobService;
   const workflowService = options.workflowService;
+  const processorRegistryService = options.processorRegistryService;
 
   app.get('/health', (context) =>
     context.json({
@@ -380,6 +389,91 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
       return context.json({ run: result.run }, result.created ? 201 : 200);
     } catch (error) {
       return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.post('/api/v1/processors/register', async (context) => {
+    if (processorRegistryService === undefined) {
+      return context.json({ error: 'processor_registry_service_not_configured' }, 503);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = registerProcessorRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_processor_registration_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const processor = await processorRegistryService.registerProcessor(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        agentId: authContext.principal.id,
+        ...request.data,
+      });
+      return context.json({ processor }, 201);
+    } catch (error) {
+      return handleProcessorApiError(context, error);
+    }
+  });
+
+  app.patch('/api/v1/processors/:processorId/capabilities', async (context) => {
+    if (processorRegistryService === undefined) {
+      return context.json({ error: 'processor_registry_service_not_configured' }, 503);
+    }
+
+    const processorId = uuidV7Schema.safeParse(context.req.param('processorId'));
+
+    if (!processorId.success) {
+      return context.json({ error: 'invalid_processor_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = updateProcessorCapabilitiesRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_processor_capabilities_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const processor = await processorRegistryService.updateCapabilities(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        processorId: processorId.data,
+        ...request.data,
+      });
+      return context.json({ processor });
+    } catch (error) {
+      return handleProcessorApiError(context, error);
+    }
+  });
+
+  app.get('/api/v1/processors', async (context) => {
+    if (processorRegistryService === undefined) {
+      return context.json({ error: 'processor_registry_service_not_configured' }, 503);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const processors = await processorRegistryService.listProcessors(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+      });
+      return context.json({ processors });
+    } catch (error) {
+      return handleProcessorApiError(context, error);
     }
   });
 
@@ -1064,6 +1158,25 @@ function handleWorkflowApiError(
 
   if (error instanceof WorkflowRunIdempotencyConflictError) {
     return context.json({ error: 'idempotency_conflict' }, 409);
+  }
+
+  throw error;
+}
+
+function handleProcessorApiError(
+  context: Context<AppEnvironment>,
+  error: unknown,
+): Response {
+  if (error instanceof AuthorizationError) {
+    return context.json({ error: error.reason }, 403);
+  }
+
+  if (error instanceof ProcessorAgentRequiredError) {
+    return context.json({ error: 'agent_token_required' }, 403);
+  }
+
+  if (error instanceof ProcessorRegistrationNotFoundError) {
+    return context.json({ error: 'processor_not_found' }, 404);
   }
 
   throw error;
