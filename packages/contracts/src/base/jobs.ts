@@ -127,9 +127,53 @@ export const jobLeaseRecordSchema = tenantProjectScopeSchema
     },
   );
 
+export const createJobRequestSchema = z
+  .object({
+    priority: z.number().int().nonnegative().optional(),
+    maxAttempts: z.number().int().positive().optional(),
+    readyAt: isoTimestampSchema.optional(),
+    constraints: metadataSchema.optional(),
+    metadata: metadataSchema.optional(),
+  })
+  .strict();
+
+export const jobResponseSchema = z
+  .object({
+    job: jobRecordSchema,
+    ready: z.boolean(),
+  })
+  .strict();
+
+export const jobListResponseSchema = z
+  .object({
+    jobs: z.array(jobRecordSchema),
+  })
+  .strict();
+
+export const jobCreatedEventPayloadSchema = tenantProjectScopeSchema
+  .extend({
+    jobId: uuidV7Schema,
+    state: jobStateSchema,
+    idempotencyKey: idempotencyKeySchema,
+    readyAt: isoTimestampSchema,
+  })
+  .strict();
+
+export const jobReadyEventPayloadSchema = tenantProjectScopeSchema
+  .extend({
+    jobId: uuidV7Schema,
+    readyAt: isoTimestampSchema,
+  })
+  .strict();
+
 export type JobState = z.infer<typeof jobStateSchema>;
 export type AttemptState = z.infer<typeof attemptStateSchema>;
 export type LeaseState = z.infer<typeof leaseStateSchema>;
 export type JobRecord = z.infer<typeof jobRecordSchema>;
 export type JobAttemptRecord = z.infer<typeof jobAttemptRecordSchema>;
 export type JobLeaseRecord = z.infer<typeof jobLeaseRecordSchema>;
+export type CreateJobRequest = z.infer<typeof createJobRequestSchema>;
+export type JobResponse = z.infer<typeof jobResponseSchema>;
+export type JobListResponse = z.infer<typeof jobListResponseSchema>;
+export type JobCreatedEventPayload = z.infer<typeof jobCreatedEventPayloadSchema>;
+export type JobReadyEventPayload = z.infer<typeof jobReadyEventPayloadSchema>;

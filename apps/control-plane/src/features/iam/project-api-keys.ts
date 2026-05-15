@@ -1,5 +1,7 @@
+import type { Kysely, Selectable } from 'kysely';
 import type { AuthContext, Permission, TenantProjectScope } from '@helix/contracts';
 
+import type { HelixDatabase } from '../../db/schema.js';
 import { assertProjectPermission } from './authorization.js';
 import type { SecurityAuditSink } from './security-audit.js';
 import {
@@ -58,6 +60,74 @@ export interface ProjectApiKeyServiceOptions {
   readonly now?: () => Date;
   readonly generateId?: () => string;
   readonly generateSecretPart?: () => string;
+}
+
+export class KyselyProjectApiKeyRepository implements ProjectApiKeyRepository {
+  private readonly db: Kysely<HelixDatabase>;
+
+  constructor(db: Kysely<HelixDatabase>) {
+    this.db = db;
+  }
+
+  async insert(record: ProjectApiKeyRecord): Promise<void> {
+    await this.db
+      .insertInto('project_api_keys')
+      .values({
+        id: record.id,
+        tenant_id: record.tenantId,
+        project_id: record.projectId,
+        name: record.name,
+        key_prefix: record.keyPrefix,
+        secret_hash_sha256: record.secretHashSha256,
+        permissions_json: record.permissions,
+        created_by_type: record.createdByType,
+        created_by_id: record.createdById,
+        revoked_at: record.revokedAt,
+        revoked_by_type: record.revokedByType,
+        revoked_by_id: record.revokedById,
+        created_at: record.createdAt,
+        updated_at: record.updatedAt,
+      })
+      .execute();
+  }
+
+  async findById(id: string): Promise<ProjectApiKeyRecord | null> {
+    const row = await this.db
+      .selectFrom('project_api_keys')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirst();
+
+    return row === undefined ? null : toProjectApiKeyRecord(row);
+  }
+
+  async findByKeyPrefix(keyPrefix: string): Promise<ProjectApiKeyRecord | null> {
+    const row = await this.db
+      .selectFrom('project_api_keys')
+      .selectAll()
+      .where('key_prefix', '=', keyPrefix)
+      .executeTakeFirst();
+
+    return row === undefined ? null : toProjectApiKeyRecord(row);
+  }
+
+  async markRevoked(input: {
+    readonly id: string;
+    readonly revokedAt: Date;
+    readonly revokedByType: string;
+    readonly revokedById: string;
+  }): Promise<void> {
+    await this.db
+      .updateTable('project_api_keys')
+      .set({
+        revoked_at: input.revokedAt,
+        revoked_by_type: input.revokedByType,
+        revoked_by_id: input.revokedById,
+        updated_at: input.revokedAt,
+      })
+      .where('id', '=', input.id)
+      .execute();
+  }
 }
 
 export class ProjectApiKeyService {
@@ -188,6 +258,27 @@ export class ProjectApiKeyService {
       occurredAt: revokedAt,
     });
   }
+}
+
+function toProjectApiKeyRecord(
+  row: Selectable<HelixDatabase['project_api_keys']>,
+): ProjectApiKeyRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    name: row.name,
+    keyPrefix: row.key_prefix,
+    secretHashSha256: row.secret_hash_sha256,
+    permissions: [...row.permissions_json] as Permission[],
+    createdByType: row.created_by_type,
+    createdById: row.created_by_id,
+    revokedAt: row.revoked_at,
+    revokedByType: row.revoked_by_type,
+    revokedById: row.revoked_by_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function assertNonEmptyPermissions(permissions: readonly Permission[]): void {

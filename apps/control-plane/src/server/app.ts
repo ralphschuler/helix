@@ -1,6 +1,12 @@
 import { Hono } from 'hono';
 import type { Context, MiddlewareHandler } from 'hono';
-import type { AuthContext, Permission } from '@helix/contracts';
+import {
+  createJobRequestSchema,
+  idempotencyKeySchema,
+  uuidV7Schema,
+  type AuthContext,
+  type Permission,
+} from '@helix/contracts';
 
 import { renderAdminDocumentStream } from '../entry-server.js';
 import { UnmappedStripeCustomerError } from '../features/billing/billing-service.js';
@@ -26,18 +32,52 @@ import {
   type CustomRoleRecord,
 } from '../features/iam/custom-roles.js';
 import type { SecurityAuditSink } from '../features/iam/security-audit.js';
+import type { JobService } from '../features/jobs/job-service.js';
 
 type AppEnvironment = {
   Variables: {
+    apiAuth: AuthContext;
     browserAuth: BrowserAuthContext;
   };
 };
 
+export interface ApiAuthRequest {
+  readonly headers: Headers;
+  readonly method: string;
+  readonly url: URL;
+}
+
+export interface ApiAuthProvider {
+  authenticate(request: ApiAuthRequest): Promise<AuthContext | null>;
+}
+
+export interface ProjectApiKeyAuthenticator {
+  authenticateProjectApiKey(token: string): Promise<AuthContext | null>;
+}
+
+export function createProjectApiKeyApiAuthProvider(
+  authenticator: ProjectApiKeyAuthenticator,
+): ApiAuthProvider {
+  return {
+    async authenticate(request) {
+      const token = getBearerToken(request.headers);
+
+      if (token === null) {
+        return null;
+      }
+
+      return authenticator.authenticateProjectApiKey(token);
+    },
+  };
+}
+
 export interface CreateAppOptions {
+  readonly apiAuthProvider?: ApiAuthProvider;
   readonly browserAuthProvider?: BrowserAuthProvider;
   readonly allowedBrowserOrigins?: readonly string[];
   readonly stripeBillingWebhookHandler?: BillingWebhookHandler;
   readonly customRoleService?: CustomRoleService;
+  readonly jobService?: JobService;
 }
 
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -57,6 +97,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
       auditSink: new NoopSecurityAuditSink(),
       repository: new InMemoryCustomRoleRepository(),
     });
+  const jobService = options.jobService;
 
   app.get('/health', (context) =>
     context.json({
@@ -90,6 +131,100 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
       }
 
       throw error;
+    }
+  });
+
+  app.use('/api/v1/*', createApiAuthMiddleware(options.apiAuthProvider));
+
+  app.post('/api/v1/jobs', async (context) => {
+    if (jobService === undefined) {
+      return context.json({ error: 'job_service_not_configured' }, 503);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = createJobRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_job_request' }, 400);
+    }
+
+    const idempotencyKey = idempotencyKeySchema.safeParse(
+      context.req.header('idempotency-key'),
+    );
+
+    if (!idempotencyKey.success) {
+      return context.json({ error: 'invalid_idempotency_key' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const result = await jobService.createJob(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        idempotencyKey: idempotencyKey.data,
+        request: request.data,
+      });
+      const response = { job: result.job, ready: result.ready };
+
+      if (result.created) {
+        return context.json(response, 201);
+      }
+
+      return context.json(response);
+    } catch (error) {
+      return handleJobApiError(context, error);
+    }
+  });
+
+  app.get('/api/v1/jobs', async (context) => {
+    if (jobService === undefined) {
+      return context.json({ error: 'job_service_not_configured' }, 503);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const jobs = await jobService.listJobs(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+      });
+
+      return context.json({ jobs });
+    } catch (error) {
+      return handleJobApiError(context, error);
+    }
+  });
+
+  app.get('/api/v1/jobs/:jobId', async (context) => {
+    if (jobService === undefined) {
+      return context.json({ error: 'job_service_not_configured' }, 503);
+    }
+
+    const jobId = uuidV7Schema.safeParse(context.req.param('jobId'));
+
+    if (!jobId.success) {
+      return context.json({ error: 'invalid_job_id' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const result = await jobService.getJob(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        jobId: jobId.data,
+      });
+
+      if (result === null) {
+        return context.json({ error: 'job_not_found' }, 404);
+      }
+
+      return context.json({ job: result.job, ready: result.ready });
+    } catch (error) {
+      return handleJobApiError(context, error);
     }
   });
 
@@ -185,6 +320,54 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
   app.get('/admin/*', renderAdminRoute);
 
   return app;
+}
+
+function getBearerToken(headers: Headers): string | null {
+  const authorization = headers.get('authorization')?.trim();
+
+  if (authorization === undefined || authorization.length === 0) {
+    return null;
+  }
+
+  const parts = authorization.split(/\s+/u);
+  const [scheme, token] = parts;
+
+  if (parts.length !== 2 || scheme?.toLowerCase() !== 'bearer' || token === undefined) {
+    return null;
+  }
+
+  return token;
+}
+
+function createApiAuthMiddleware(
+  apiAuthProvider: ApiAuthProvider | undefined,
+): MiddlewareHandler<AppEnvironment> {
+  return async (context, next) => {
+    if (apiAuthProvider === undefined) {
+      return context.json({ error: 'api_auth_not_configured' }, 503);
+    }
+
+    const apiAuth = await apiAuthProvider.authenticate({
+      headers: context.req.raw.headers,
+      method: context.req.method,
+      url: new URL(context.req.url),
+    });
+
+    if (apiAuth === null) {
+      return context.json(
+        {
+          error: 'unauthenticated_api_request',
+        },
+        401,
+        {
+          'www-authenticate': 'Bearer realm="api"',
+        },
+      );
+    }
+
+    context.set('apiAuth', apiAuth);
+    await next();
+  };
 }
 
 function requireBrowserPermission(
@@ -403,6 +586,21 @@ function getStringArrayField(body: Record<string, unknown>, field: string): read
   }
 
   return value as string[];
+}
+
+function handleJobApiError(
+  context: Context<AppEnvironment>,
+  error: unknown,
+): Response {
+  if (error instanceof AuthorizationError) {
+    return context.json({ error: error.reason }, 403);
+  }
+
+  if (error instanceof Error && error.message.includes('idempotencyKey')) {
+    return context.json({ error: 'invalid_idempotency_key' }, 400);
+  }
+
+  throw error;
 }
 
 function handleCustomRoleError(

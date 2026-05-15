@@ -24,6 +24,7 @@ export const permissionCatalog = [
   'agents:revoke',
   'agents:claim',
   'jobs:create',
+  'jobs:read',
   'workflows:start',
   'audit:read',
 ] as const;

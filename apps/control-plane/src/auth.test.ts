@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { AuthContext } from '@helix/contracts';
 
 import {
   BrowserAuthConfigurationError,
@@ -10,7 +11,7 @@ import {
   defaultMockAuthContext,
   mockBrowserSessionHeader,
 } from './features/auth/browser-auth.js';
-import { createApp } from './server/app.js';
+import { createApp, createProjectApiKeyApiAuthProvider } from './server/app.js';
 
 describe('browser auth guard', () => {
   it('rejects unauthenticated admin SSR requests through the public HTTP interface', async () => {
@@ -172,5 +173,43 @@ describe('browser auth guard', () => {
       },
       permissions: ['admin:read'],
     });
+  });
+});
+
+describe('machine API auth guard', () => {
+  it('extracts bearer project API keys without accepting other auth schemes', async () => {
+    const authContext: AuthContext = {
+      tenantId: defaultMockAuthContext.tenantId,
+      projectId: defaultMockAuthContext.projectId,
+      principal: { type: 'api_key', id: 'project-api-key-1' },
+      permissions: ['jobs:create', 'jobs:read'],
+    };
+    const provider = createProjectApiKeyApiAuthProvider({
+      async authenticateProjectApiKey(token) {
+        return token === 'hpx_public.secret' ? authContext : null;
+      },
+    });
+
+    await expect(
+      provider.authenticate({
+        headers: new Headers({ authorization: 'Bearer hpx_public.secret' }),
+        method: 'POST',
+        url: new URL('http://localhost/api/v1/jobs'),
+      }),
+    ).resolves.toEqual(authContext);
+    await expect(
+      provider.authenticate({
+        headers: new Headers({ authorization: 'Basic hpx_public.secret' }),
+        method: 'POST',
+        url: new URL('http://localhost/api/v1/jobs'),
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      provider.authenticate({
+        headers: new Headers(),
+        method: 'POST',
+        url: new URL('http://localhost/api/v1/jobs'),
+      }),
+    ).resolves.toBeNull();
   });
 });

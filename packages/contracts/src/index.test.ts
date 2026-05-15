@@ -12,11 +12,16 @@ import {
   customRoleSchema,
   errorEnvelopeSchema,
   eventEnvelopeSchema,
+  createJobRequestSchema,
   idempotencyKeySchema,
   idempotencyKeyScopeSchema,
   jobAttemptRecordSchema,
+  jobCreatedEventPayloadSchema,
   jobLeaseRecordSchema,
+  jobListResponseSchema,
+  jobReadyEventPayloadSchema,
   jobRecordSchema,
+  jobResponseSchema,
   jobStateSchema,
   leaseStateSchema,
   opaqueCursorSchema,
@@ -177,6 +182,67 @@ describe('job execution contracts', () => {
       }),
     ).toThrow();
   });
+
+  it('models job API requests, responses, and durable runtime event payloads', () => {
+    const job = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3b90',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      state: 'queued',
+      priority: 5,
+      maxAttempts: 2,
+      attemptCount: 0,
+      readyAt: '2026-05-12T19:00:00.000Z',
+      idempotencyKey: 'create-job:client-request-2',
+      constraints: { capability: 'thumbnail' },
+      metadata: { source: 'sdk' },
+      createdAt: '2026-05-12T19:00:00.000Z',
+      updatedAt: '2026-05-12T19:00:00.000Z',
+      finishedAt: null,
+    };
+    const createRequest = {
+      priority: 5,
+      maxAttempts: 2,
+      constraints: { capability: 'thumbnail' },
+      metadata: { source: 'sdk' },
+    };
+
+    expect(createJobRequestSchema.parse(createRequest)).toEqual(createRequest);
+    expect(jobResponseSchema.parse({ job, ready: true })).toEqual({ job, ready: true });
+    expect(jobListResponseSchema.parse({ jobs: [job] })).toEqual({ jobs: [job] });
+    expect(
+      jobCreatedEventPayloadSchema.parse({
+        tenantId: validTenantId,
+        projectId: validProjectId,
+        jobId: job.id,
+        state: 'queued',
+        idempotencyKey: job.idempotencyKey,
+        readyAt: job.readyAt,
+      }),
+    ).toEqual({
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: job.id,
+      state: 'queued',
+      idempotencyKey: job.idempotencyKey,
+      readyAt: job.readyAt,
+    });
+    expect(
+      jobReadyEventPayloadSchema.parse({
+        tenantId: validTenantId,
+        projectId: validProjectId,
+        jobId: job.id,
+        readyAt: job.readyAt,
+      }),
+    ).toEqual({
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: job.id,
+      readyAt: job.readyAt,
+    });
+    expect(() => createJobRequestSchema.parse({ priority: -1 })).toThrow();
+    expect(() => createJobRequestSchema.parse({ rawPayload: 'not allowed' })).toThrow();
+  });
 });
 
 describe('base API boundary contracts', () => {
@@ -272,6 +338,7 @@ describe('IAM contracts', () => {
     };
 
     expect(permissionCatalog).toContain('project_api_keys:create');
+    expect(permissionCatalog).toContain('jobs:read');
     expect(catalogPermissionSchema.parse('agents:claim')).toBe('agents:claim');
     expect(customRoleSchema.parse(customRole)).toEqual(customRole);
     expect(createCustomRoleRequestSchema.parse(createRequest)).toEqual(createRequest);
