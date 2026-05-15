@@ -41,6 +41,12 @@ import {
   tenantScopeSchema,
   updateCustomRoleRequestSchema,
   permissionCatalog,
+  processorCapabilitySchema,
+  processorHardwareSchema,
+  processorRegistryListResponseSchema,
+  processorRegistryRecordSchema,
+  processorRegistryResponseSchema,
+  routingExplanationSchema,
   projectApiKeyRecordSchema,
   stripeCustomerMappingSchema,
   stripeWebhookEventRecordSchema,
@@ -476,6 +482,69 @@ describe('job execution contracts', () => {
     expect(() => claimJobRequestSchema.parse({ leaseTtlSeconds: 0 })).toThrow();
     expect(() => heartbeatLeaseRequestSchema.parse({ leaseTtlSeconds: 86_401 })).toThrow();
     expect(() => createJobRequestSchema.parse({ rawPayload: 'not allowed' })).toThrow();
+  });
+});
+
+describe('processor registry contracts', () => {
+  it('models project-scoped processor capabilities, hardware, labels, tags, and routing explanations', () => {
+    const processor = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d3d10',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      agentId: '01890f42-98c4-7cc3-aa5e-0c567f1d3d11',
+      capabilities: [
+        { name: 'thumbnail', version: '1.2.0' },
+        { name: 'transcode', version: '2026-05-15' },
+      ],
+      hardware: {
+        gpu: true,
+        gpuModel: 'nvidia-l4',
+        gpuCount: 1,
+        memoryMb: 24_576,
+        cpuCores: 8,
+        architecture: 'linux/amd64',
+      },
+      region: 'us-east-1',
+      labels: {
+        tier: 'interactive',
+        'node.kubernetes.io/instance-type': 'g6.xlarge',
+      },
+      tags: ['gpu', 'image'],
+      routingExplanation: {
+        eligible: true,
+        reasons: ['capability thumbnail@1.2.0 matched', 'region us-east-1 matched'],
+        matchedCapabilities: ['thumbnail'],
+        rejectedConstraints: [],
+        metadata: { score: 98 },
+      },
+      createdAt: '2026-05-15T14:00:00.000Z',
+      updatedAt: '2026-05-15T14:01:00.000Z',
+    };
+
+    expect(processorCapabilitySchema.parse({ name: 'thumbnail', version: '1.2.0' })).toEqual({
+      name: 'thumbnail',
+      version: '1.2.0',
+    });
+    expect(processorHardwareSchema.parse(processor.hardware)).toEqual(processor.hardware);
+    expect(routingExplanationSchema.parse(processor.routingExplanation)).toEqual(
+      processor.routingExplanation,
+    );
+    expect(processorRegistryRecordSchema.parse(processor)).toEqual(processor);
+    expect(processorRegistryResponseSchema.parse({ processor })).toEqual({ processor });
+    expect(processorRegistryListResponseSchema.parse({ processors: [processor] })).toEqual({
+      processors: [processor],
+    });
+    expect(() => processorRegistryRecordSchema.parse({ ...processor, projectId: undefined })).toThrow();
+    expect(() => processorRegistryRecordSchema.parse({ ...processor, capabilities: [] })).toThrow();
+    expect(() =>
+      processorRegistryRecordSchema.parse({
+        ...processor,
+        hardware: { gpu: false, gpuModel: 'nvidia-l4', memoryMb: 24_576 },
+      }),
+    ).toThrow();
+    expect(() => processorRegistryRecordSchema.parse({ ...processor, region: '   ' })).toThrow();
+    expect(() => processorRegistryRecordSchema.parse({ ...processor, labels: { '': 'bad' } })).toThrow();
+    expect(() => processorRegistryRecordSchema.parse({ ...processor, rawSecret: 'not allowed' })).toThrow();
   });
 });
 

@@ -157,6 +157,42 @@ describe('database migration runner', () => {
     ).resolves.toBe(jobMigration?.sql);
   });
 
+  it('ships processor registry schema with scoped capabilities and routing explanations', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const processorMigration = migrations.find(
+      (migration) => migration.id === '0008_processor_registry_schema',
+    );
+
+    expect(processorMigration).toBeDefined();
+    expect(processorMigration?.sql).toContain('create table if not exists processor_registrations');
+    expect(processorMigration?.sql).toMatch(/processor_registrations[\s\S]*tenant_id uuid not null[\s\S]*project_id uuid not null[\s\S]*agent_id uuid not null/u);
+    expect(processorMigration?.sql).toContain('processor_registrations_project_scope_fk');
+    expect(processorMigration?.sql).toContain('processor_registrations_agent_scope_fk');
+    expect(processorMigration?.sql).toContain('capabilities_json jsonb not null');
+    expect(processorMigration?.sql).toContain('hardware_json jsonb not null');
+    expect(processorMigration?.sql).toContain('region text not null');
+    expect(processorMigration?.sql).toContain("labels_json jsonb not null default '{}'::jsonb");
+    expect(processorMigration?.sql).toContain("tags_json jsonb not null default '[]'::jsonb");
+    expect(processorMigration?.sql).toContain("routing_explanation_json jsonb not null default '{}'::jsonb");
+    expect(processorMigration?.sql).toContain('processor_registrations_capabilities_items_array');
+    expect(processorMigration?.sql).toContain('processor_registrations_capabilities_items_non_empty');
+    expect(processorMigration?.sql).toContain('processor_registrations_capabilities_items_shape');
+    expect(processorMigration?.sql).toContain('processor_registrations_hardware_is_object');
+    expect(processorMigration?.sql).toContain('processor_registrations_hardware_gpu_boolean');
+    expect(processorMigration?.sql).toContain('processor_registrations_hardware_memory_number');
+    expect(processorMigration?.sql).toContain('processor_registrations_labels_is_object');
+    expect(processorMigration?.sql).toContain('processor_registrations_tags_is_array');
+    expect(processorMigration?.sql).toContain('processor_registrations_routing_explanation_is_object');
+    expect(processorMigration?.sql).toContain('processor_registrations_agent_unique');
+    expect(processorMigration?.sql).toContain('processor_registrations_project_region_idx');
+    expect(processorMigration?.sql).not.toContain('credential_hash_sha256');
+    expect(processorMigration?.sql).not.toContain('token_hash_sha256');
+
+    await expect(
+      readFile(path.join(getDefaultMigrationsDirectory(), '0008_processor_registry_schema.sql'), 'utf8'),
+    ).resolves.toBe(processorMigration?.sql);
+  });
+
   it('ships workflow definition and version schema with immutable published snapshots and run version refs', async () => {
     const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
     const workflowMigration = migrations.find(
