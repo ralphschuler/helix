@@ -9,6 +9,7 @@ export type NullableTimestampColumn = ColumnType<
 >;
 export type JsonObject = Record<string, unknown>;
 export type JsonColumn = ColumnType<JsonObject, JsonObject | string | undefined, JsonObject | string>;
+export type JsonArrayColumn<T> = ColumnType<readonly T[], readonly T[] | string | undefined, readonly T[] | string>;
 export type NullableTextColumn = ColumnType<string | null, string | null | undefined, string | null>;
 export type DefaultedNumberColumn = ColumnType<number, number | undefined, number>;
 export type StringArrayJsonColumn = ColumnType<
@@ -330,6 +331,21 @@ export interface JobLeasesTable {
   updated_at: TimestampColumn;
 }
 
+export interface ProcessorRegistrationsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  agent_id: string;
+  capabilities_json: JsonColumn;
+  hardware_json: JsonColumn;
+  region: string;
+  labels_json: JsonColumn;
+  tags_json: JsonArrayColumn<string>;
+  routing_explanation_json: JsonColumn;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
 export interface HelixDatabase {
   _schema_migrations: SchemaMigrationsTable;
   tenants: TenantsTable;
@@ -350,6 +366,7 @@ export interface HelixDatabase {
   jobs: JobsTable;
   job_attempts: JobAttemptsTable;
   job_leases: JobLeasesTable;
+  processor_registrations: ProcessorRegistrationsTable;
   runtime_events: RuntimeEventsTable;
   runtime_outbox: RuntimeOutboxTable;
   runtime_inbox: RuntimeInboxTable;
