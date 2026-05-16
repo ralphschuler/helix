@@ -39,6 +39,7 @@ yarn workspace @helix/control-plane test -- event-store
 yarn workspace @helix/control-plane test -- workflow-stream
 yarn workspace @helix/control-plane test -- job-stream
 yarn workspace @helix/control-plane test -- stream-auth
+yarn workspace @helix/control-plane test -- streams
 yarn workspace @helix/control-plane test -- workflow-checkpoints
 yarn workspace @helix/control-plane check
 yarn workspace @helix/control-plane lint
