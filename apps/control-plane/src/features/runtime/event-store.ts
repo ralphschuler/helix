@@ -41,6 +41,12 @@ export interface RuntimeEventStoreProjection {
   list(input: RuntimeEventStoreListInput): Promise<RuntimeEventStoreListResult>;
 }
 
+export class RuntimeEventCursorExpiredError extends Error {
+  constructor() {
+    super('Runtime event cursor expired.');
+  }
+}
+
 export interface InMemoryRuntimeEventStoreProjectionOptions {
   readonly now?: () => Date;
   readonly retainForDays?: number;
@@ -131,11 +137,23 @@ export class InMemoryRuntimeEventStoreProjection implements RuntimeEventStorePro
     const afterSequence = input.after === undefined || input.after === null
       ? 0
       : decodeRuntimeEventCursor(input.after).sequence;
+
+    if (afterSequence > 0) {
+      const cursorRow = this.rows.find(
+        (row) => row.tenantId === input.tenantId && row.projectId === input.projectId && row.sequence === afterSequence,
+      );
+
+      if (cursorRow !== undefined && isExpired(cursorRow, this.now())) {
+        throw new RuntimeEventCursorExpiredError();
+      }
+    }
+
     const events = this.rows
       .filter(
         (row) =>
           row.tenantId === input.tenantId &&
           row.projectId === input.projectId &&
+          !isExpired(row, this.now()) &&
           row.sequence > afterSequence &&
           matchesWorkflow(row, input.workflowId) &&
           matchesMetadata(row, input.metadata),
@@ -149,6 +167,7 @@ export class InMemoryRuntimeEventStoreProjection implements RuntimeEventStorePro
       (row) =>
         row.tenantId === input.tenantId &&
         row.projectId === input.projectId &&
+        !isExpired(row, this.now()) &&
         row.sequence > last.sequence &&
         matchesWorkflow(row, input.workflowId) &&
         matchesMetadata(row, input.metadata),
@@ -160,6 +179,10 @@ export class InMemoryRuntimeEventStoreProjection implements RuntimeEventStorePro
   private retainedUntil(occurredAt: Date): Date | null {
     return this.retainForDays === null ? null : new Date(occurredAt.getTime() + this.retainForDays * msPerDay);
   }
+}
+
+function isExpired(row: RuntimeEventStoreRow, now: Date): boolean {
+  return row.retainedUntil !== null && row.retainedUntil.getTime() <= now.getTime();
 }
 
 function matchesWorkflow(row: RuntimeEventStoreRow, workflowId: string | undefined): boolean {
