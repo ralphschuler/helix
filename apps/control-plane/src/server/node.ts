@@ -16,6 +16,7 @@ import {
   ProcessorRegistryService,
 } from '../features/processors/processor-registry.js';
 import { KyselyWorkflowRepository, WorkflowService } from '../features/workflows/workflow-service.js';
+import { InMemoryScheduleRepository, ScheduleService } from '../features/schedules/schedule-service.js';
 import {
   createApiAuthProvider,
   createApp,
@@ -108,6 +109,9 @@ function createDefaultAppOptions(): CreateAppOptions {
       agentTokenAuthenticator: agentAuthService,
     }),
     jobService,
+    scheduleService: new ScheduleService({
+      repository: new InMemoryScheduleRepository(),
+    }),
     processorRegistryService: new ProcessorRegistryService({
       auditSink,
       repository: processorRepository,

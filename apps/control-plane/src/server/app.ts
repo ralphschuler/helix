@@ -5,6 +5,7 @@ import {
   completeJobAttemptRequestSchema,
   createJobRequestSchema,
   createWorkflowRequestSchema,
+  createScheduleRequestSchema,
   deliverWorkflowSignalRequestSchema,
   failJobAttemptRequestSchema,
   heartbeatLeaseRequestSchema,
@@ -17,6 +18,7 @@ import {
   startWorkflowRunRequestSchema,
   resumeWorkflowRunRequestSchema,
   updateProcessorCapabilitiesRequestSchema,
+  updateScheduleRequestSchema,
   updateWorkflowDraftRequestSchema,
   uuidV7Schema,
   type AuthContext,
@@ -58,6 +60,7 @@ import {
   WorkflowVersionNotFoundError,
   type WorkflowService,
 } from '../features/workflows/workflow-service.js';
+import type { ScheduleService } from '../features/schedules/schedule-service.js';
 import {
   ProcessorAgentRequiredError,
   ProcessorRegistrationNotFoundError,
@@ -127,6 +130,7 @@ export interface CreateAppOptions {
   readonly customRoleService?: CustomRoleService;
   readonly jobService?: JobService;
   readonly workflowService?: WorkflowService;
+  readonly scheduleService?: ScheduleService;
   readonly processorRegistryService?: ProcessorRegistryService;
 }
 
@@ -149,6 +153,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     });
   const jobService = options.jobService;
   const workflowService = options.workflowService;
+  const scheduleService = options.scheduleService;
   const processorRegistryService = options.processorRegistryService;
 
   app.get('/health', (context) =>
@@ -187,6 +192,153 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
   });
 
   app.use('/api/v1/*', createApiAuthMiddleware(options.apiAuthProvider));
+
+  app.post('/api/v1/schedules', async (context) => {
+    if (scheduleService === undefined) {
+      return context.json({ error: 'schedule_service_not_configured' }, 503);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = createScheduleRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_schedule_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const schedule = await scheduleService.createSchedule(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        request: request.data,
+      });
+      return context.json({ schedule }, 201);
+    } catch (error) {
+      return handleScheduleApiError(context, error);
+    }
+  });
+
+  app.get('/api/v1/schedules', async (context) => {
+    if (scheduleService === undefined) {
+      return context.json({ error: 'schedule_service_not_configured' }, 503);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const schedules = await scheduleService.listSchedules(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+      });
+      return context.json({ schedules });
+    } catch (error) {
+      return handleScheduleApiError(context, error);
+    }
+  });
+
+  app.get('/api/v1/schedules/:scheduleId', async (context) => {
+    if (scheduleService === undefined) {
+      return context.json({ error: 'schedule_service_not_configured' }, 503);
+    }
+
+    const scheduleId = uuidV7Schema.safeParse(context.req.param('scheduleId'));
+
+    if (!scheduleId.success) {
+      return context.json({ error: 'invalid_schedule_id' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const schedule = await scheduleService.getSchedule(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        scheduleId: scheduleId.data,
+      });
+
+      if (schedule === null) {
+        return context.json({ error: 'schedule_not_found' }, 404);
+      }
+
+      return context.json({ schedule });
+    } catch (error) {
+      return handleScheduleApiError(context, error);
+    }
+  });
+
+  app.patch('/api/v1/schedules/:scheduleId', async (context) => {
+    if (scheduleService === undefined) {
+      return context.json({ error: 'schedule_service_not_configured' }, 503);
+    }
+
+    const scheduleId = uuidV7Schema.safeParse(context.req.param('scheduleId'));
+
+    if (!scheduleId.success) {
+      return context.json({ error: 'invalid_schedule_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = updateScheduleRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_schedule_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const schedule = await scheduleService.updateSchedule(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        scheduleId: scheduleId.data,
+        request: request.data,
+      });
+
+      if (schedule === null) {
+        return context.json({ error: 'schedule_not_found' }, 404);
+      }
+
+      return context.json({ schedule });
+    } catch (error) {
+      return handleScheduleApiError(context, error);
+    }
+  });
+
+  app.delete('/api/v1/schedules/:scheduleId', async (context) => {
+    if (scheduleService === undefined) {
+      return context.json({ error: 'schedule_service_not_configured' }, 503);
+    }
+
+    const scheduleId = uuidV7Schema.safeParse(context.req.param('scheduleId'));
+
+    if (!scheduleId.success) {
+      return context.json({ error: 'invalid_schedule_id' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const deleted = await scheduleService.deleteSchedule(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        scheduleId: scheduleId.data,
+      });
+
+      if (!deleted) {
+        return context.json({ error: 'schedule_not_found' }, 404);
+      }
+
+      return context.body(null, 204);
+    } catch (error) {
+      return handleScheduleApiError(context, error);
+    }
+  });
 
   app.post('/api/v1/workflows', async (context) => {
     if (workflowService === undefined) {
@@ -1440,6 +1592,17 @@ function getStringArrayField(body: Record<string, unknown>, field: string): read
   }
 
   return value as string[];
+}
+
+function handleScheduleApiError(
+  context: Context<AppEnvironment>,
+  error: unknown,
+): Response {
+  if (error instanceof AuthorizationError) {
+    return context.json({ error: error.reason }, 403);
+  }
+
+  throw error;
 }
 
 function handleWorkflowApiError(

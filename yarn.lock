@@ -294,6 +294,10 @@ __metadata:
 "@helix/scheduler@workspace:services/scheduler":
   version: 0.0.0-use.local
   resolution: "@helix/scheduler@workspace:services/scheduler"
+  dependencies:
+    eslint: "npm:^10.3.0"
+    typescript: "npm:^6.0.3"
+    vitest: "npm:^4.1.6"
   languageName: unknown
   linkType: soft
 

@@ -30,6 +30,10 @@ export const permissionCatalog = [
   'workflows:update',
   'workflows:publish',
   'workflows:start',
+  'schedules:create',
+  'schedules:read',
+  'schedules:update',
+  'schedules:delete',
   'audit:read',
 ] as const;
 

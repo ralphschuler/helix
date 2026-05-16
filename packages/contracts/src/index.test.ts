@@ -45,7 +45,6 @@ import {
   tenantProjectScopeSchema,
   tenantScopeSchema,
   updateCustomRoleRequestSchema,
-  permissionCatalog,
   processorCapabilitySchema,
   processorHardwareSchema,
   processorHeartbeatEventPayloadSchema,
@@ -70,6 +69,14 @@ import {
   workflowRunStartedEventPayloadSchema,
   workflowVersionRecordSchema,
   workflowVersionResponseSchema,
+  createScheduleRequestSchema,
+  updateScheduleRequestSchema,
+  scheduleRecordSchema,
+  scheduleResponseSchema,
+  scheduleListResponseSchema,
+  scheduleModeSchema,
+  scheduleTargetSchema,
+  permissionCatalog,
 } from '@helix/contracts';
 
 const validTenantId = '01890f42-98c4-7cc3-8a5e-0c567f1d3a77';
@@ -927,5 +934,98 @@ describe('base event contracts', () => {
         scope: { tenantId: validTenantId },
       }),
     ).toThrow();
+  });
+});
+
+describe('schedule contracts', () => {
+  const validJobTarget = {
+    type: 'job' as const,
+    request: {
+      priority: 5,
+      maxAttempts: 2,
+      constraints: { capability: 'thumbnail' },
+      metadata: { source: 'schedule' },
+    },
+  };
+  const validWorkflowTarget = {
+    type: 'workflow' as const,
+    workflowId: '01890f42-98c4-7cc3-aa5e-0c567f1d4a01',
+    request: {
+      workflowVersionId: '01890f42-98c4-7cc3-aa5e-0c567f1d4a02',
+    },
+  };
+
+  it('models tenant/project scoped schedules for jobs and workflows with deterministic fire idempotency', () => {
+    const record = {
+      id: '01890f42-98c4-7cc3-aa5e-0c567f1d4a03',
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      name: 'Nightly thumbnail batch',
+      description: 'Runs once per night',
+      state: 'enabled',
+      target: validJobTarget,
+      mode: {
+        type: 'cron',
+        expression: '0 2 * * *',
+        timezone: 'UTC',
+      },
+      misfirePolicy: 'fire_once',
+      fireIdempotencyKeyPrefix: 'schedule:nightly-thumbnail',
+      metadata: { owner: 'ops' },
+      createdAt: '2026-05-16T10:00:00.000Z',
+      updatedAt: '2026-05-16T10:00:00.000Z',
+    };
+
+    expect(createScheduleRequestSchema.parse({
+      name: record.name,
+      description: record.description,
+      target: record.target,
+      mode: record.mode,
+      misfirePolicy: record.misfirePolicy,
+      fireIdempotencyKeyPrefix: record.fireIdempotencyKeyPrefix,
+      metadata: record.metadata,
+    })).toEqual({
+      name: record.name,
+      description: record.description,
+      target: record.target,
+      mode: record.mode,
+      misfirePolicy: record.misfirePolicy,
+      fireIdempotencyKeyPrefix: record.fireIdempotencyKeyPrefix,
+      metadata: record.metadata,
+    });
+    expect(scheduleTargetSchema.parse(validWorkflowTarget)).toEqual(validWorkflowTarget);
+    expect(scheduleRecordSchema.parse(record)).toEqual(record);
+    expect(scheduleResponseSchema.parse({ schedule: record })).toEqual({ schedule: record });
+    expect(scheduleListResponseSchema.parse({ schedules: [record] })).toEqual({ schedules: [record] });
+    expect(updateScheduleRequestSchema.parse({ state: 'disabled' })).toEqual({ state: 'disabled' });
+    expect(permissionCatalog).toContain('schedules:create');
+    expect(permissionCatalog).toContain('schedules:read');
+    expect(permissionCatalog).toContain('schedules:update');
+    expect(permissionCatalog).toContain('schedules:delete');
+  });
+
+  it('rejects invalid schedule definitions before persistence or runtime enqueue', () => {
+    expect(() => createScheduleRequestSchema.parse({
+      name: 'Missing idempotency prefix',
+      target: validJobTarget,
+      mode: { type: 'delayed', runAt: '2026-05-16T11:00:00.000Z' },
+    })).toThrow();
+    expect(() => createScheduleRequestSchema.parse({
+      name: 'Missing target scope',
+      fireIdempotencyKeyPrefix: 'schedule:missing-target',
+      mode: { type: 'delayed', runAt: '2026-05-16T11:00:00.000Z' },
+    })).toThrow();
+    expect(() => scheduleModeSchema.parse({ type: 'interval', everySeconds: 0 })).toThrow();
+    expect(() => scheduleModeSchema.parse({ type: 'cron', expression: 'not cron', timezone: 'UTC' })).toThrow();
+    expect(() => scheduleModeSchema.parse({ type: 'cron', expression: '99 99 99 99 99', timezone: 'UTC' })).toThrow();
+    expect(() => scheduleModeSchema.parse({ type: 'cron', expression: '0 0 32 13 8', timezone: 'UTC' })).toThrow();
+    expect(() => scheduleModeSchema.parse({
+      type: 'interval',
+      everySeconds: 60,
+      startAt: '2026-05-16T12:00:00.000Z',
+      endAt: '2026-05-16T11:00:00.000Z',
+    })).toThrow();
+    expect(() => scheduleTargetSchema.parse({ type: 'workflow', request: {} })).toThrow();
+    expect(() => updateScheduleRequestSchema.parse({})).toThrow();
   });
 });
