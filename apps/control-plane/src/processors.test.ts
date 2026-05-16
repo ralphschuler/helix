@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { AuthContext } from '@helix/contracts';
-import { processorRegistryListResponseSchema, processorRegistryResponseSchema } from '@helix/contracts';
+import {
+  processorHeartbeatResponseSchema,
+  processorRegistryListResponseSchema,
+  processorRegistryResponseSchema,
+} from '@helix/contracts';
 
 import {
   InMemoryProcessorRegistryRepository,
@@ -50,10 +54,13 @@ function createFixedApiAuthProvider(authContext: AuthContext | null): ApiAuthPro
   };
 }
 
-function createService(options: { readonly auditSink?: SecurityAuditSink } = {}) {
+function createService(options: {
+  readonly auditSink?: SecurityAuditSink;
+  readonly repository?: InMemoryProcessorRegistryRepository;
+} = {}) {
   return new ProcessorRegistryService({
     ...(options.auditSink === undefined ? {} : { auditSink: options.auditSink }),
-    repository: new InMemoryProcessorRegistryRepository(),
+    repository: options.repository ?? new InMemoryProcessorRegistryRepository(),
     generateId: () => '01890f42-98c4-7cc3-aa5e-0c567f1d3d10',
     now: () => new Date('2026-05-15T14:00:00.000Z'),
   });
@@ -61,13 +68,14 @@ function createService(options: { readonly auditSink?: SecurityAuditSink } = {})
 
 function createProcessorsApp(authContext: AuthContext | null = agentAuth) {
   const auditSink = new RecordingAuditSink();
-  const service = createService({ auditSink });
+  const repository = new InMemoryProcessorRegistryRepository();
+  const service = createService({ auditSink, repository });
   const app = createApp({
     apiAuthProvider: createFixedApiAuthProvider(authContext),
     processorRegistryService: service,
   });
 
-  return { app, auditSink, service };
+  return { app, auditSink, repository, service };
 }
 
 const registrationBody = {
@@ -150,6 +158,80 @@ describe('processor registry API', () => {
     expect(await maliciousScope.json()).toEqual({ error: 'invalid_processor_registration_request' });
     expect(projectKeyRegistration.status).toBe(403);
     expect(await projectKeyRegistration.json()).toEqual({ error: 'agent_token_required' });
+  });
+
+  it('records processor heartbeat health through the public API and audits the report', async () => {
+    const { app, auditSink, repository } = createProcessorsApp();
+    const registered = await app.request('/api/v1/processors/register', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-agent-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(registrationBody),
+    });
+    const registeredBody = processorRegistryResponseSchema.parse(await registered.json());
+
+    const heartbeat = await app.request(`/api/v1/processors/${registeredBody.processor.id}/heartbeat`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-agent-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        status: 'degraded',
+        activeJobCount: 2,
+        message: 'GPU queue saturated',
+        metrics: { loadAverage: 0.94, accessToken: 'secret-token' },
+      }),
+    });
+    const list = await app.request('/api/v1/processors', {
+      headers: { authorization: 'Bearer valid-agent-token' },
+    });
+
+    expect(heartbeat.status).toBe(200);
+    expect(processorHeartbeatResponseSchema.parse(await heartbeat.json())).toMatchObject({
+      processor: {
+        id: registeredBody.processor.id,
+        lastHeartbeatAt: '2026-05-15T14:00:00.000Z',
+        healthStatus: 'degraded',
+      },
+    });
+    expect(processorRegistryListResponseSchema.parse(await list.json())).toMatchObject({
+      processors: [
+        {
+          id: registeredBody.processor.id,
+          lastHeartbeatAt: '2026-05-15T14:00:00.000Z',
+          healthStatus: 'degraded',
+        },
+      ],
+    });
+    expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
+      'processor.heartbeat.reported',
+    ]);
+    expect(repository.runtimeEvents[0]?.payload).toMatchObject({
+      tenantId,
+      projectId,
+      processorId: registeredBody.processor.id,
+      agentId,
+      status: 'degraded',
+      activeJobCount: 2,
+      message: 'GPU queue saturated',
+      metrics: { loadAverage: 0.94, accessToken: '[redacted]' },
+      reportedAt: '2026-05-15T14:00:00.000Z',
+    });
+    expect(repository.runtimeOutbox.map((outbox) => outbox.eventId)).toEqual(
+      repository.runtimeEvents.map((event) => event.id),
+    );
+    expect(auditSink.events.map((event) => event.action)).toEqual([
+      'processor.registered',
+      'processor.heartbeat_reported',
+    ]);
+    expect(auditSink.events[1]?.metadata).toEqual({
+      agentId,
+      status: 'degraded',
+      activeJobCount: 2,
+    });
   });
 
   it('updates processor capabilities through the public API and audits the change', async () => {

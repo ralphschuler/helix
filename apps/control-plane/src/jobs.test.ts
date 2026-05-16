@@ -6,6 +6,7 @@ import {
   failJobAttemptResponseSchema,
   heartbeatLeaseResponseSchema,
   jobHistoryResponseSchema,
+  reportJobProgressResponseSchema,
   jobListResponseSchema,
   jobResponseSchema,
 } from '@helix/contracts';
@@ -1406,6 +1407,95 @@ describe('job API', () => {
         lastHeartbeatAt: '2026-05-15T13:03:00.000Z',
       },
     });
+  });
+
+  it('persists progress events only for the active lease held by the authenticated agent', async () => {
+    const repository = new InMemoryJobRepository();
+    const producerApp = createJobsApp(projectAuth, repository).app;
+    await producerApp.request('/api/v1/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+        'idempotency-key': 'create-job:progress-test',
+      },
+      body: JSON.stringify({ metadata: { source: 'progress-test' } }),
+    });
+    const claimApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3f01',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3f02',
+      ],
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+    }).app;
+    const claimResponse = await claimApp.request('/api/v1/jobs/claim', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ leaseTtlSeconds: 600 }),
+    });
+    const claimBody = claimJobResponseSchema.parse(await claimResponse.json());
+
+    if (claimBody.claim === null) {
+      throw new Error('Expected a claimed job.');
+    }
+
+    const progressApp = createJobsApp(agentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3f03',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3f04',
+      ],
+      now: () => new Date('2026-05-15T13:04:00.000Z'),
+    }).app;
+    const wrongAgentApp = createJobsApp(otherAgentAuth, repository, {
+      ids: [
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3f05',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3f06',
+      ],
+      now: () => new Date('2026-05-15T13:05:00.000Z'),
+    }).app;
+    const progressPath = `/api/v1/jobs/${claimBody.claim.job.id}/attempts/${claimBody.claim.attempt.id}/leases/${claimBody.claim.lease.id}/progress`;
+    const accepted = await progressApp.request(progressPath, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ percent: 42, message: 'Rendered frame 42', metadata: { frame: 42, apiToken: 'secret-token' } }),
+    });
+    const rejected = await wrongAgentApp.request(progressPath, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer valid-project-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ percent: 99 }),
+    });
+
+    expect(accepted.status).toBe(202);
+    expect(rejected.status).toBe(404);
+    expect(reportJobProgressResponseSchema.parse(await accepted.json())).toEqual({ accepted: true });
+    expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
+      'job.created',
+      'job.ready',
+      'job.claimed',
+      'job.progress.reported',
+    ]);
+    expect(repository.runtimeEvents[3]?.payload).toEqual({
+      tenantId,
+      projectId,
+      jobId: claimBody.claim.job.id,
+      attemptId: claimBody.claim.attempt.id,
+      leaseId: claimBody.claim.lease.id,
+      agentId,
+      progress: { percent: 42, message: 'Rendered frame 42', metadata: { frame: 42, apiToken: '[redacted]' } },
+      reportedAt: '2026-05-15T13:04:00.000Z',
+    });
+    expect(repository.runtimeOutbox.map((outbox) => outbox.eventId)).toEqual(
+      repository.runtimeEvents.map((event) => event.id),
+    );
   });
 
   it('requeues a heartbeated claim after broker restart observes stopped heartbeat expiry', async () => {

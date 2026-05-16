@@ -1,5 +1,5 @@
 import type { ColumnType } from 'kysely';
-import type { AttemptState, BillingStatus, JobState, LeaseState, WorkflowRunRecord, WorkflowStepRecord } from '@helix/contracts';
+import type { AttemptState, BillingStatus, JobState, LeaseState, ProcessorHealthStatus, WorkflowRunRecord, WorkflowStepRecord } from '@helix/contracts';
 
 export type TimestampColumn = ColumnType<Date, Date | string | undefined, Date | string>;
 export type NullableTimestampColumn = ColumnType<
@@ -252,6 +252,11 @@ export type WorkflowStepTypeColumn = ColumnType<
   WorkflowStepRecord['type'] | undefined,
   WorkflowStepRecord['type']
 >;
+export type ProcessorHealthStatusColumn = ColumnType<
+  ProcessorHealthStatus | null,
+  ProcessorHealthStatus | null | undefined,
+  ProcessorHealthStatus | null
+>;
 
 export interface WorkflowDefinitionsTable {
   id: string;
@@ -379,6 +384,8 @@ export interface ProcessorRegistrationsTable {
   labels_json: JsonColumn;
   tags_json: JsonArrayColumn<string>;
   routing_explanation_json: JsonColumn;
+  last_heartbeat_at: NullableTimestampColumn;
+  health_status: ProcessorHealthStatusColumn;
   created_at: TimestampColumn;
   updated_at: TimestampColumn;
 }
