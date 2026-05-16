@@ -26,7 +26,7 @@ import {
   type Permission,
 } from '@helix/contracts';
 
-import { renderAdminDocumentStream } from '../entry-server.js';
+import { renderAdminDocumentStream, renderCustomerDocumentStream } from '../entry-server.js';
 import { UnmappedStripeCustomerError } from '../features/billing/billing-service.js';
 import {
   StripeWebhookPayloadError,
@@ -1485,6 +1485,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     }
   });
 
+  app.get('/', browserSecurity, renderCustomerRoute);
   app.get('/admin', renderAdminRoute);
   app.get('/admin/*', renderAdminRoute);
 
@@ -1551,6 +1552,18 @@ function requireBrowserPermission(
 
     await next();
   };
+}
+
+async function renderCustomerRoute(context: Context<AppEnvironment>): Promise<Response> {
+  const stream = await renderCustomerDocumentStream(
+    new URL(context.req.url).pathname,
+  );
+
+  return new Response(stream, {
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+    },
+  });
 }
 
 async function renderAdminRoute(context: Context<AppEnvironment>): Promise<Response> {

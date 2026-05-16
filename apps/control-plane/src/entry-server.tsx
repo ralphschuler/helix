@@ -7,8 +7,30 @@ import { renderToPipeableStream } from 'react-dom/server';
 import { AdminApp } from './admin/App.js';
 import { serializeDehydratedState } from './admin/dehydration.js';
 import { createAdminRouter, type AdminRouter } from './admin/router.js';
+import { CustomerApp } from './customer/App.js';
+import { createCustomerRouter, type CustomerRouter } from './customer/router.js';
 
 const shellAbortAfterMs = 5_000;
+
+export async function renderCustomerDocumentStream(
+  url: string,
+): Promise<ReadableStream<Uint8Array>> {
+  const queryClient = createAdminQueryClient();
+  const router = createCustomerRouter({ queryClient, url });
+
+  await router.load();
+
+  const dehydratedState = dehydrate(queryClient);
+
+  return renderReactDocumentToWebStream(
+    <CustomerDocument
+      dehydratedState={dehydratedState}
+      queryClient={queryClient}
+      router={router}
+      serializedDehydratedState={serializeDehydratedState(dehydratedState)}
+    />,
+  );
+}
 
 export async function renderAdminDocumentStream(
   url: string,
@@ -39,6 +61,43 @@ export function createAdminQueryClient(): QueryClient {
       },
     },
   });
+}
+
+function CustomerDocument({
+  dehydratedState,
+  queryClient,
+  router,
+  serializedDehydratedState,
+}: {
+  readonly dehydratedState: DehydratedState;
+  readonly queryClient: QueryClient;
+  readonly router: CustomerRouter;
+  readonly serializedDehydratedState: string;
+}): React.ReactElement {
+  return (
+    <html lang="en">
+      <head>
+        <meta charSet="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Helix Control Plane</title>
+      </head>
+      <body>
+        <div id="root">
+          <CustomerApp
+            dehydratedState={dehydratedState}
+            queryClient={queryClient}
+            router={router}
+          />
+        </div>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `window.__HELIX_DEHYDRATED_STATE__=${serializedDehydratedState};`,
+          }}
+        />
+        <script type="module" src="/src/entry-client.tsx" />
+      </body>
+    </html>
+  );
 }
 
 function AdminDocument({
