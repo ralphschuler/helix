@@ -17,6 +17,8 @@ export interface ScheduleEvent extends TenantProjectScope {
   readonly idempotencyKey: string;
   readonly type: 'schedule.fire.enqueued' | 'schedule.fire.skipped_duplicate';
   readonly emittedAt: string;
+  readonly retentionPolicyId: string | null;
+  readonly scheduleName: string;
 }
 
 export interface SchedulerLeaseEvent {
@@ -110,13 +112,21 @@ export class ScheduleEvaluator {
 
         if (result === 'enqueued') {
           enqueued += 1;
-          await this.store.emitScheduleEvent({ ...work, type: 'schedule.fire.enqueued', emittedAt: currentTime.toISOString() });
+          await this.store.emitScheduleEvent({
+            ...work,
+            type: 'schedule.fire.enqueued',
+            emittedAt: currentTime.toISOString(),
+            retentionPolicyId: getRetentionPolicyId(schedule),
+            scheduleName: schedule.name,
+          });
         } else {
           skipped += 1;
           await this.store.emitScheduleEvent({
             ...work,
             type: 'schedule.fire.skipped_duplicate',
             emittedAt: currentTime.toISOString(),
+            retentionPolicyId: getRetentionPolicyId(schedule),
+            scheduleName: schedule.name,
           });
         }
       }
@@ -199,6 +209,11 @@ export class InMemoryScheduleEvaluationStore implements ScheduleEvaluationStore 
   async emitScheduleEvent(event: ScheduleEvent): Promise<void> {
     this.events.push(cloneJson(event));
   }
+}
+
+function getRetentionPolicyId(schedule: ScheduleRecord): string | null {
+  const retentionPolicyId = schedule.metadata.retentionPolicyId;
+  return typeof retentionPolicyId === 'string' ? retentionPolicyId : null;
 }
 
 function getDueFireTime(schedule: ScheduleRecord, now: Date): string | null {

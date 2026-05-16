@@ -45,6 +45,10 @@ describe('ScheduleEvaluator', () => {
       target: baseSchedule.target,
     });
     expect(store.events.map((event) => event.type)).toEqual(['schedule.fire.enqueued', 'schedule.fire.skipped_duplicate']);
+    expect(store.events[0]).toMatchObject({
+      retentionPolicyId: null,
+      scheduleName: 'nightly import',
+    });
   });
 
   it('does not enqueue disabled schedules', async () => {

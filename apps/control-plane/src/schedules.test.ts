@@ -3,6 +3,7 @@ import type { AuthContext } from '@helix/contracts';
 import { scheduleListResponseSchema, scheduleResponseSchema } from '@helix/contracts';
 
 import { createApp, type ApiAuthProvider } from './server/app.js';
+import type { SecurityAuditEvent, SecurityAuditSink } from './features/iam/security-audit.js';
 import { InMemoryScheduleRepository, ScheduleService } from './features/schedules/schedule-service.js';
 
 const tenantId = '01890f42-98c4-7cc3-8a5e-0c567f1d3a77';
@@ -29,9 +30,19 @@ function createFixedApiAuthProvider(authContext: AuthContext | null): ApiAuthPro
   };
 }
 
+class RecordingAuditSink implements SecurityAuditSink {
+  readonly events: SecurityAuditEvent[] = [];
+
+  async record(event: SecurityAuditEvent): Promise<void> {
+    this.events.push(event);
+  }
+}
+
 function createSchedulesApp(authContext: AuthContext | null = scheduleAuth) {
   const repository = new InMemoryScheduleRepository();
+  const auditSink = new RecordingAuditSink();
   const service = new ScheduleService({
+    auditSink,
     generateId: () => '01890f42-98c4-7cc3-aa5e-0c567f1d4a03',
     now: () => new Date('2026-05-16T10:00:00.000Z'),
     repository,
@@ -41,7 +52,7 @@ function createSchedulesApp(authContext: AuthContext | null = scheduleAuth) {
     scheduleService: service,
   });
 
-  return { app, repository, service };
+  return { app, auditSink, repository, service };
 }
 
 const jsonHeaders = {
@@ -96,6 +107,65 @@ describe('schedule API', () => {
     expect(scheduleListResponseSchema.parse(await listedResponse.json()).schedules).toHaveLength(1);
     expect(scheduleResponseSchema.parse(await updatedResponse.json()).schedule.state).toBe('disabled');
     expect(deletedResponse.status).toBe(204);
+  });
+
+  it('audits security-sensitive schedule mutations with retention metadata', async () => {
+    const { app, auditSink } = createSchedulesApp();
+
+    const createdResponse = await app.request('/api/v1/schedules', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        name: 'Retention aware batch',
+        target: {
+          type: 'job',
+          request: { priority: 5, metadata: { source: 'schedule' } },
+        },
+        mode: { type: 'delayed', runAt: '2026-05-16T10:05:00.000Z' },
+        fireIdempotencyKeyPrefix: 'schedule:retention-aware-batch',
+        metadata: { retentionPolicyId: 'schedule-events-30d' },
+      }),
+    });
+    const created = scheduleResponseSchema.parse(await createdResponse.json());
+
+    await app.request(`/api/v1/schedules/${created.schedule.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify({ state: 'disabled' }),
+    });
+    await app.request(`/api/v1/schedules/${created.schedule.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify({ state: 'enabled' }),
+    });
+    await app.request(`/api/v1/schedules/${created.schedule.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify({ name: 'Renamed batch' }),
+    });
+    await app.request(`/api/v1/schedules/${created.schedule.id}`, {
+      method: 'DELETE',
+      headers: jsonHeaders,
+    });
+
+    expect(auditSink.events.map((event) => event.action)).toEqual([
+      'schedule.created',
+      'schedule.disabled',
+      'schedule.enabled',
+      'schedule.updated',
+      'schedule.deleted',
+    ]);
+    expect(auditSink.events[0]).toMatchObject({
+      tenantId,
+      projectId,
+      actor: scheduleAuth.principal,
+      resourceType: 'schedule',
+      resourceId: created.schedule.id,
+      metadata: {
+        retentionPolicyId: 'schedule-events-30d',
+        scheduleName: 'Retention aware batch',
+      },
+    });
   });
 
   it('rejects invalid schedule definitions at the public API boundary', async () => {
