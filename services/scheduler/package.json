@@ -9,6 +9,9 @@
     "lint": "eslint . --max-warnings 0"
   },
   "type": "module",
+  "dependencies": {
+    "@helix/contracts": "workspace:*"
+  },
   "devDependencies": {
     "eslint": "^10.3.0",
     "typescript": "^6.0.3",
