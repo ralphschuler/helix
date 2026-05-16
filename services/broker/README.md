@@ -11,6 +11,7 @@ Current foundation:
 - `runBrokerServiceLoop` provides the lease-expiry worker loop. It calls the host `expireLeases` service with tenant/project scope, caps batch size, polls quickly after work, backs off when idle, backs off after errors, and stops through `AbortSignal`.
 - `createBrokerPolicyEngine` isolates claim ordering policy from claim transaction plumbing. Formal priority levels are `critical`, `high`, `normal`, `low`, and `background`; invalid levels are rejected at the policy boundary.
 - `createConcurrencyGroupPolicy` reserves and releases tenant/project-scoped group counters around claims. Reservations reject excess concurrent work at the configured positive integer limit, and duplicate/stale releases are idempotent so terminal retry paths cannot corrupt counters.
+- `createRateLimitBucketPolicy` checks tenant/project-scoped rate limit buckets for tenant, project, processor, external-service, and capability resources. The in-memory store supports fixed-window and sliding-window interval policies, reports reset/retry timing, and rejects excess claims without external services.
 
 Run/validation commands:
 
