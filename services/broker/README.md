@@ -10,6 +10,7 @@ Current foundation:
 - Runtime retry policy uses `maxAttempts`: non-exhausted failures/expired leases return to `retrying`; exhausted failures/expired leases move the job to `dead_lettered` and keep attempt/lease rows inspectable.
 - `runBrokerServiceLoop` provides the lease-expiry worker loop. It calls the host `expireLeases` service with tenant/project scope, caps batch size, polls quickly after work, backs off when idle, backs off after errors, and stops through `AbortSignal`.
 - `createBrokerPolicyEngine` isolates claim ordering policy from claim transaction plumbing. Formal priority levels are `critical`, `high`, `normal`, `low`, and `background`; invalid levels are rejected at the policy boundary.
+- `createConcurrencyGroupPolicy` reserves and releases tenant/project-scoped group counters around claims. Reservations reject excess concurrent work at the configured positive integer limit, and duplicate/stale releases are idempotent so terminal retry paths cannot corrupt counters.
 
 Run/validation commands:
 
