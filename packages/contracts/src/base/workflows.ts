@@ -49,7 +49,7 @@ export const workflowRunRecordSchema = tenantProjectScopeSchema
   })
   .strict();
 
-export const workflowStepStateValues = ['pending', 'running', 'waiting_for_signal', 'waiting_for_timer', 'completed', 'failed', 'canceled'] as const;
+export const workflowStepStateValues = ['pending', 'running', 'waiting_for_signal', 'waiting_for_approval', 'waiting_for_timer', 'completed', 'failed', 'canceled'] as const;
 export const workflowStepTypeValues = ['job', 'wait_signal', 'approval', 'timer', 'pause', 'join', 'completion'] as const;
 export const workflowStepStateSchema = z.enum(workflowStepStateValues);
 export const workflowStepTypeSchema = z.enum(workflowStepTypeValues);
@@ -109,6 +109,13 @@ export const deliverWorkflowSignalRequestSchema = z
   })
   .strict();
 
+export const completeWorkflowApprovalRequestSchema = z
+  .object({
+    decision: z.enum(['approved', 'rejected']),
+    payload: metadataSchema.optional(),
+  })
+  .strict();
+
 export const workflowResponseSchema = z
   .object({
     workflow: workflowDefinitionRecordSchema,
@@ -134,6 +141,13 @@ export const workflowRunResponseSchema = z
   .strict();
 
 export const workflowSignalResponseSchema = z
+  .object({
+    step: workflowStepRecordSchema,
+    duplicate: z.boolean(),
+  })
+  .strict();
+
+export const workflowApprovalResponseSchema = z
   .object({
     step: workflowStepRecordSchema,
     duplicate: z.boolean(),
@@ -170,5 +184,7 @@ export type StartWorkflowRunRequest = z.infer<typeof startWorkflowRunRequestSche
 export type PauseWorkflowRunRequest = z.infer<typeof pauseWorkflowRunRequestSchema>;
 export type ResumeWorkflowRunRequest = z.infer<typeof resumeWorkflowRunRequestSchema>;
 export type DeliverWorkflowSignalRequest = z.infer<typeof deliverWorkflowSignalRequestSchema>;
+export type CompleteWorkflowApprovalRequest = z.infer<typeof completeWorkflowApprovalRequestSchema>;
 export type WorkflowSignalResponse = z.infer<typeof workflowSignalResponseSchema>;
+export type WorkflowApprovalResponse = z.infer<typeof workflowApprovalResponseSchema>;
 export type WorkflowRunStartedEventPayload = z.infer<typeof workflowRunStartedEventPayloadSchema>;
