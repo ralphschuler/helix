@@ -8,5 +8,10 @@
     "test": "vitest run --passWithNoTests --config ../../vitest.config.ts --dir .",
     "lint": "eslint . --max-warnings 0"
   },
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "eslint": "^10.3.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
 }
