@@ -15,6 +15,7 @@ SaaS API, control-plane application, and v1 `/admin` UI shell.
 - Runtime transactional outbox writer seam for committing durable state changes and scoped outbox events together.
 - Runtime outbox publisher service boundary for draining due events to Kafka/Redpanda-style producers with retry.
 - Runtime consumer inbox helpers for event-id dedupe, retryable failed processing, and tenant/project-scoped consumption records.
+- Runtime event store projection boundary for tenant/project-scoped event views, opaque cursors, and retention metadata without making projections authoritative state.
 - Project API key-authenticated job API for creating/listing/statusing tenant/project-scoped jobs with idempotent creation and runtime outbox events.
 - Retry/DLQ job behavior: exhausted failed attempts or expired leases transition jobs to `dead_lettered`, while attempt and lease history remains inspectable.
 - Agent token-authenticated processor registration API for outbound processor capability updates with scoped audit events.
@@ -32,6 +33,7 @@ yarn workspace @helix/control-plane test -- jobs
 yarn workspace @helix/control-plane test -- processors
 yarn workspace @helix/control-plane test -- outbox
 yarn workspace @helix/control-plane test -- inbox
+yarn workspace @helix/control-plane test -- event-store
 yarn workspace @helix/control-plane test -- workflow-checkpoints
 yarn workspace @helix/control-plane check
 yarn workspace @helix/control-plane lint
