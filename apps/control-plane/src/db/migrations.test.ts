@@ -172,6 +172,21 @@ describe('database migration runner', () => {
     ).resolves.toBe(signalMigration?.sql);
   });
 
+  it('ships waiting timer workflow step state migration', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const timerMigration = migrations.find(
+      (migration) => migration.id === '0012_workflow_waiting_timer_state',
+    );
+
+    expect(timerMigration).toBeDefined();
+    expect(timerMigration?.sql).toContain('workflow_steps_state_check');
+    expect(timerMigration?.sql).toContain('waiting_for_timer');
+
+    await expect(
+      readFile(path.join(getDefaultMigrationsDirectory(), '0012_workflow_waiting_timer_state.sql'), 'utf8'),
+    ).resolves.toBe(timerMigration?.sql);
+  });
+
   it('ships processor registry schema with scoped capabilities and routing explanations', async () => {
     const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
     const processorMigration = migrations.find(

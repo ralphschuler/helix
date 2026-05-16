@@ -83,6 +83,7 @@ export interface WorkflowRepository {
     readonly updatedAt: string;
   }): Promise<WorkflowStepRecord | null>;
   createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord>;
+  listWaitingTimerSteps(input: TenantProjectScope): Promise<WorkflowStepRecord[]>;
 }
 
 export interface WorkflowJobActivationInput {
@@ -143,6 +144,7 @@ export class WorkflowStepJobMismatchError extends Error {
 interface ParsedWorkflowNode {
   readonly id: string;
   readonly type: WorkflowStepType;
+  readonly wakeAt?: string;
 }
 
 interface ParsedWorkflowEdge {
@@ -392,6 +394,58 @@ export class WorkflowService {
     return { step: completed, duplicate: false };
   }
 
+  async wakeDueTimers(
+    authContext: AuthContext,
+    input: TenantProjectScope,
+  ): Promise<{ readonly completed: number }> {
+    assertProjectPermission(authContext, input, 'workflows:start');
+
+    const timestamp = this.now().toISOString();
+    const nowMs = Date.parse(timestamp);
+    const waitingTimers = await this.repository.listWaitingTimerSteps(input);
+    let completedCount = 0;
+
+    for (const step of waitingTimers) {
+      const timerWakeAt = typeof step.metadata.timerWakeAt === 'string' ? step.metadata.timerWakeAt : null;
+
+      if (timerWakeAt === null || Number.isNaN(Date.parse(timerWakeAt)) || Date.parse(timerWakeAt) > nowMs) {
+        continue;
+      }
+
+      const completed = await this.repository.updateStep({
+        tenantId: step.tenantId,
+        projectId: step.projectId,
+        runId: step.runId,
+        stepId: step.stepId,
+        expectedState: 'waiting_for_timer',
+        state: transitionWorkflowStepState(step.state, 'completed'),
+        metadata: {
+          ...step.metadata,
+          timerWokenAt: timestamp,
+        },
+        updatedAt: timestamp,
+      });
+
+      if (completed === null) {
+        continue;
+      }
+
+      completedCount += 1;
+      const run = await this.repository.findRun({
+        tenantId: step.tenantId,
+        projectId: step.projectId,
+        workflowId: step.workflowId,
+        runId: step.runId,
+      });
+
+      if (run !== null) {
+        await this.activateNewlyReadyJobSteps(run);
+      }
+    }
+
+    return { completed: completedCount };
+  }
+
   async resumeRun(
     authContext: AuthContext,
     input: TenantProjectScope & { readonly workflowId: string; readonly runId: string },
@@ -477,7 +531,7 @@ export class WorkflowService {
       type: node.type,
       state: readyStepIds.has(node.id) ? getReadyStepState(node.type) : 'pending',
       jobId: null,
-      metadata: {},
+      metadata: node.type === 'timer' && node.wakeAt !== undefined ? { timerWakeAt: node.wakeAt } : {},
       createdAt: timestamp,
       updatedAt: timestamp,
     }));
@@ -544,6 +598,22 @@ export class WorkflowService {
 
         if (!isReady) {
           continue;
+        }
+
+        if (step.type === 'timer') {
+          const waiting = await this.repository.updateStep({
+            tenantId: run.tenantId,
+            projectId: run.projectId,
+            runId: run.id,
+            stepId: step.stepId,
+            state: transitionWorkflowStepState(step.state, 'waiting_for_timer'),
+            updatedAt: this.now().toISOString(),
+          });
+
+          if (waiting !== null) {
+            steps = await this.repository.listRunSteps(scope);
+            progressed = true;
+          }
         }
 
         if (step.type === 'wait_signal') {
@@ -865,6 +935,18 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
     return cloneStep(updated);
   }
 
+  async listWaitingTimerSteps(input: TenantProjectScope): Promise<WorkflowStepRecord[]> {
+    return this.steps
+      .filter(
+        (step) =>
+          step.tenantId === input.tenantId &&
+          step.projectId === input.projectId &&
+          step.type === 'timer' &&
+          step.state === 'waiting_for_timer',
+      )
+      .map(cloneStep);
+  }
+
   async createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord> {
     this.runs.push(cloneRun(input.run));
     this.steps.push(...input.steps.map(cloneStep));
@@ -1060,6 +1142,20 @@ export class KyselyWorkflowRepository implements WorkflowRepository {
     return row === undefined ? null : toWorkflowStepRecord(row);
   }
 
+  async listWaitingTimerSteps(input: TenantProjectScope): Promise<WorkflowStepRecord[]> {
+    const rows = await this.db
+      .selectFrom('workflow_steps')
+      .selectAll()
+      .where('tenant_id', '=', input.tenantId)
+      .where('project_id', '=', input.projectId)
+      .where('type', '=', 'timer')
+      .where('state', '=', 'waiting_for_timer')
+      .orderBy('updated_at', 'asc')
+      .execute();
+
+    return rows.map(toWorkflowStepRecord);
+  }
+
   async createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord> {
     return this.db.transaction().execute(async (transaction) => {
       const row = await transaction
@@ -1108,6 +1204,10 @@ function parseWorkflowGraph(graph: Record<string, unknown>): ParsedWorkflowGraph
       return [];
     }
 
+    if (typeof record.wakeAt === 'string') {
+      return [{ id: stepId, type, wakeAt: record.wakeAt }];
+    }
+
     return [{ id: stepId, type }];
   });
   const edges = rawEdges.flatMap((edge): ParsedWorkflowEdge[] => {
@@ -1133,13 +1233,15 @@ function findInitialReadyStepIds(graph: ParsedWorkflowGraph): ReadonlySet<string
   const blockedStepIds = new Set(graph.edges.map((edge) => edge.to));
   return new Set(
     graph.nodes
-      .filter((node) => (node.type === 'job' || node.type === 'wait_signal') && !blockedStepIds.has(node.id))
+      .filter((node) => (node.type === 'job' || node.type === 'wait_signal' || node.type === 'timer') && !blockedStepIds.has(node.id))
       .map((node) => node.id),
   );
 }
 
 function getReadyStepState(type: WorkflowStepType): WorkflowStepRecord['state'] {
-  return type === 'wait_signal' ? 'waiting_for_signal' : 'running';
+  if (type === 'wait_signal') return 'waiting_for_signal';
+  if (type === 'timer') return 'waiting_for_timer';
+  return 'running';
 }
 
 function cloneJsonObject(value: Record<string, unknown>): Record<string, unknown> {

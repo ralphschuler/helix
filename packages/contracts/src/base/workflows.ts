@@ -49,7 +49,7 @@ export const workflowRunRecordSchema = tenantProjectScopeSchema
   })
   .strict();
 
-export const workflowStepStateValues = ['pending', 'running', 'waiting_for_signal', 'completed', 'failed', 'canceled'] as const;
+export const workflowStepStateValues = ['pending', 'running', 'waiting_for_signal', 'waiting_for_timer', 'completed', 'failed', 'canceled'] as const;
 export const workflowStepTypeValues = ['job', 'wait_signal', 'approval', 'timer', 'pause', 'join', 'completion'] as const;
 export const workflowStepStateSchema = z.enum(workflowStepStateValues);
 export const workflowStepTypeSchema = z.enum(workflowStepTypeValues);

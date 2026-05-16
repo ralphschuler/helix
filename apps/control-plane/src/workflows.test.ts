@@ -399,6 +399,86 @@ describe('workflow API', () => {
     ]);
   });
 
+  it('persists timer wake-up timestamps and resumes due timers after restart exactly once', async () => {
+    const workflowRepository = new InMemoryWorkflowRepository();
+    const jobRepository = new InMemoryJobRepository();
+    const jobService = new JobService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+      ]),
+      now: () => new Date('2026-05-15T13:05:00.000Z'),
+      repository: jobRepository,
+    });
+    let now = new Date('2026-05-15T13:00:00.000Z');
+    const createWorkflowService = () => new WorkflowService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d11',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d12',
+      ]),
+      jobActivator: async ({ idempotencyKey, request, scope }) => jobService.createJob(
+        { ...workflowAuth, permissions: [...workflowAuth.permissions, 'jobs:create'] },
+        { ...scope, idempotencyKey, request },
+      ),
+      now: () => now,
+      repository: workflowRepository,
+    });
+    const firstRuntime = createWorkflowService();
+    const workflow = await firstRuntime.createWorkflow(workflowAuth, {
+      tenantId,
+      projectId,
+      request: {
+        slug: 'timer-wakeup',
+        name: 'Timer Wakeup',
+        draftGraph: {
+          nodes: [
+            { id: 'sleep', type: 'timer', wakeAt: '2026-05-15T13:05:00.000Z' },
+            { id: 'ship', type: 'job' },
+          ],
+          edges: [{ from: 'sleep', to: 'ship' }],
+        },
+      },
+    });
+    await firstRuntime.publishWorkflow(workflowAuth, { tenantId, projectId, workflowId: workflow.id });
+    const started = await firstRuntime.startRun(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      idempotencyKey: 'workflow-run:timer-1',
+      request: {},
+    });
+    const runId = started?.run.id ?? '';
+
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        stepId: 'sleep',
+        type: 'timer',
+        state: 'waiting_for_timer',
+        metadata: { timerWakeAt: '2026-05-15T13:05:00.000Z' },
+      }),
+      expect.objectContaining({ stepId: 'ship', type: 'job', state: 'pending', jobId: null }),
+    ]));
+    expect(jobRepository.jobs).toHaveLength(0);
+
+    now = new Date('2026-05-15T13:04:59.000Z');
+    await expect(firstRuntime.wakeDueTimers(workflowAuth, { tenantId, projectId })).resolves.toEqual({ completed: 0 });
+
+    now = new Date('2026-05-15T13:05:00.000Z');
+    const restartedRuntime = createWorkflowService();
+    await expect(restartedRuntime.wakeDueTimers(workflowAuth, { tenantId, projectId })).resolves.toEqual({ completed: 1 });
+    await expect(restartedRuntime.wakeDueTimers(workflowAuth, { tenantId, projectId })).resolves.toEqual({ completed: 0 });
+
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        stepId: 'sleep',
+        state: 'completed',
+        metadata: { timerWakeAt: '2026-05-15T13:05:00.000Z', timerWokenAt: '2026-05-15T13:05:00.000Z' },
+      }),
+      expect.objectContaining({ stepId: 'ship', state: 'running', jobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10' }),
+    ]));
+    expect(jobRepository.jobs.map((job) => job.idempotencyKey)).toEqual([`workflow-step:${runId}:ship`]);
+  });
+
   it('activates fan-out branches and advances a fan-in join only after all dependencies complete', async () => {
     const workflowRepository = new InMemoryWorkflowRepository();
     const jobRepository = new InMemoryJobRepository();
@@ -522,7 +602,7 @@ describe('workflow API', () => {
       nodes: [
         { id: 'start', type: 'job' },
         { id: 'branch-a', type: 'job' },
-        { id: 'branch-b', type: 'timer' },
+        { id: 'branch-b', type: 'timer', wakeAt: '2026-05-15T13:05:00.000Z' },
         { id: 'join', type: 'join' },
         { id: 'done', type: 'completion' },
       ],
@@ -584,6 +664,14 @@ describe('workflow API', () => {
           edges: [{ from: 'review', to: 'join' }],
         },
         issue: 'join step',
+      },
+      {
+        name: 'timer without wakeAt',
+        graph: {
+          nodes: [{ id: 'sleep', type: 'timer' }],
+          edges: [],
+        },
+        issue: 'ISO wakeAt timestamp',
       },
     ] as const;
 
