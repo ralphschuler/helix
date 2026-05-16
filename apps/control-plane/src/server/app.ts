@@ -5,6 +5,7 @@ import {
   completeJobAttemptRequestSchema,
   createJobRequestSchema,
   createWorkflowRequestSchema,
+  deliverWorkflowSignalRequestSchema,
   failJobAttemptRequestSchema,
   heartbeatLeaseRequestSchema,
   idempotencyKeySchema,
@@ -450,6 +451,48 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
       }
 
       return context.json({ run: result.run }, result.created ? 201 : 200);
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.post('/api/v1/signals/:workflowId', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    const workflowId = uuidV7Schema.safeParse(context.req.param('workflowId'));
+
+    if (!workflowId.success) {
+      return context.json({ error: 'invalid_workflow_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = deliverWorkflowSignalRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_workflow_signal_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const result = await workflowService.deliverSignal(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+        request: request.data,
+      });
+
+      if (result === null) {
+        return context.json({ error: 'workflow_signal_not_found' }, 404);
+      }
+
+      return context.json({ step: result.step, duplicate: result.duplicate }, result.duplicate ? 200 : 202);
     } catch (error) {
       return handleWorkflowApiError(context, error);
     }
