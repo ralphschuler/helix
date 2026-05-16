@@ -895,12 +895,14 @@ describe('billing contracts', () => {
 });
 
 describe('base event contracts', () => {
-  it('requires versioned events to carry IDs, tenant/project scope, and timestamps', () => {
+  it('requires versioned events to carry IDs, tenant/project scope, timestamps, and ordering keys', () => {
     const eventEnvelope = {
       id: '01890f42-98c4-7cc3-aa5e-0c567f1d3a79',
       type: 'workflow.run.started',
       version: 1,
       occurredAt: '2026-05-12T15:59:00.000Z',
+      orderingKey: 'workflow-run:01890f42-98c4-7cc3-ba5e-0c567f1d3a80',
+      partitionKey: 'workflow-run:01890f42-98c4-7cc3-ba5e-0c567f1d3a80',
       scope: {
         tenantId: validTenantId,
         projectId: validProjectId,
@@ -916,6 +918,8 @@ describe('base event contracts', () => {
     expect(() =>
       eventEnvelopeSchema.parse({ ...eventEnvelope, occurredAt: 'not-a-date' }),
     ).toThrow();
+    expect(() => eventEnvelopeSchema.parse({ ...eventEnvelope, orderingKey: '   ' })).toThrow();
+    expect(() => eventEnvelopeSchema.parse({ ...eventEnvelope, partitionKey: '' })).toThrow();
     expect(() => eventEnvelopeSchema.parse({ ...eventEnvelope, payload: undefined })).toThrow();
     expect(() =>
       eventEnvelopeSchema.parse({

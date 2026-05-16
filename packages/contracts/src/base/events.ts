@@ -13,6 +13,8 @@ export const eventEnvelopeSchema = z.object({
   type: nonBlankStringSchema,
   version: z.number().int().positive(),
   occurredAt: z.string().datetime({ offset: true }),
+  orderingKey: nonBlankStringSchema,
+  partitionKey: nonBlankStringSchema,
   scope: tenantProjectScopeSchema,
   payload: z.record(z.string(), z.unknown()),
 });
