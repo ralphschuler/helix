@@ -25,6 +25,7 @@ export interface RuntimeEventStoreRow {
 export interface RuntimeEventStoreListInput {
   readonly tenantId: string;
   readonly projectId: string;
+  readonly workflowId?: string;
   readonly after?: string | null;
   readonly limit: number;
 }
@@ -134,7 +135,8 @@ export class InMemoryRuntimeEventStoreProjection implements RuntimeEventStorePro
         (row) =>
           row.tenantId === input.tenantId &&
           row.projectId === input.projectId &&
-          row.sequence > afterSequence,
+          row.sequence > afterSequence &&
+          (input.workflowId === undefined || row.payload.workflowId === input.workflowId),
       )
       .sort((left, right) => left.sequence - right.sequence)
       .slice(0, input.limit)
@@ -142,7 +144,11 @@ export class InMemoryRuntimeEventStoreProjection implements RuntimeEventStorePro
 
     const last = events.at(-1);
     const hasMore = last !== undefined && this.rows.some(
-      (row) => row.tenantId === input.tenantId && row.projectId === input.projectId && row.sequence > last.sequence,
+      (row) =>
+        row.tenantId === input.tenantId &&
+        row.projectId === input.projectId &&
+        row.sequence > last.sequence &&
+        (input.workflowId === undefined || row.payload.workflowId === input.workflowId),
     );
 
     return { events, nextCursor: hasMore ? last.cursor : null };
