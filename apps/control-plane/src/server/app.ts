@@ -8,6 +8,8 @@ import {
   failJobAttemptRequestSchema,
   heartbeatLeaseRequestSchema,
   idempotencyKeySchema,
+  processorHeartbeatRequestSchema,
+  reportJobProgressRequestSchema,
   publishWorkflowRequestSchema,
   registerProcessorRequestSchema,
   startWorkflowRunRequestSchema,
@@ -484,6 +486,48 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     }
   });
 
+  app.post('/api/v1/processors/:processorId/heartbeat', async (context) => {
+    if (processorRegistryService === undefined) {
+      return context.json({ error: 'processor_registry_service_not_configured' }, 503);
+    }
+
+    const processorId = uuidV7Schema.safeParse(context.req.param('processorId'));
+
+    if (!processorId.success) {
+      return context.json({ error: 'invalid_processor_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = processorHeartbeatRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_processor_heartbeat_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const processor = await processorRegistryService.reportHeartbeat(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        processorId: processorId.data,
+        request: request.data,
+      });
+
+      if (processor === null) {
+        return context.json({ error: 'processor_not_found' }, 404);
+      }
+
+      return context.json({ processor });
+    } catch (error) {
+      return handleProcessorApiError(context, error);
+    }
+  });
+
   app.patch('/api/v1/processors/:processorId/capabilities', async (context) => {
     if (processorRegistryService === undefined) {
       return context.json({ error: 'processor_registry_service_not_configured' }, 503);
@@ -675,6 +719,60 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
       }
 
       return context.json({ lease });
+    } catch (error) {
+      return handleJobApiError(context, error);
+    }
+  });
+
+  app.post('/api/v1/jobs/:jobId/attempts/:attemptId/leases/:leaseId/progress', async (context) => {
+    if (jobService === undefined) {
+      return context.json({ error: 'job_service_not_configured' }, 503);
+    }
+
+    const jobId = uuidV7Schema.safeParse(context.req.param('jobId'));
+    const attemptId = uuidV7Schema.safeParse(context.req.param('attemptId'));
+    const leaseId = uuidV7Schema.safeParse(context.req.param('leaseId'));
+
+    if (!jobId.success) {
+      return context.json({ error: 'invalid_job_id' }, 400);
+    }
+
+    if (!attemptId.success) {
+      return context.json({ error: 'invalid_attempt_id' }, 400);
+    }
+
+    if (!leaseId.success) {
+      return context.json({ error: 'invalid_lease_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = reportJobProgressRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_progress_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const accepted = await jobService.reportProgress(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        jobId: jobId.data,
+        attemptId: attemptId.data,
+        leaseId: leaseId.data,
+        request: request.data,
+      });
+
+      if (!accepted) {
+        return context.json({ error: 'attempt_not_found' }, 404);
+      }
+
+      return context.json({ accepted: true }, 202);
     } catch (error) {
       return handleJobApiError(context, error);
     }

@@ -15,6 +15,8 @@ const labelKeySchema = z
 const labelValueSchema = z.string().max(256);
 const metadataSchema = z.record(z.string(), z.unknown());
 
+export const processorHealthStatusSchema = z.enum(['healthy', 'degraded', 'unhealthy']);
+
 export const processorHardwareSchema = z
   .object({
     gpu: z.boolean(),
@@ -62,6 +64,8 @@ export const processorRegistryRecordSchema = tenantProjectScopeSchema
     labels: processorLabelsSchema,
     tags: processorTagsSchema,
     routingExplanation: routingExplanationSchema,
+    lastHeartbeatAt: isoTimestampSchema.optional(),
+    healthStatus: processorHealthStatusSchema.optional(),
     createdAt: isoTimestampSchema,
     updatedAt: isoTimestampSchema,
   })
@@ -85,6 +89,33 @@ export const updateProcessorCapabilitiesRequestSchema = z
   })
   .strict();
 
+export const processorHeartbeatRequestSchema = z
+  .object({
+    status: processorHealthStatusSchema,
+    activeJobCount: z.number().int().nonnegative().optional(),
+    message: z.string().max(4096).optional(),
+    metrics: metadataSchema.optional(),
+  })
+  .strict();
+
+export const processorHeartbeatResponseSchema = z
+  .object({
+    processor: processorRegistryRecordSchema,
+  })
+  .strict();
+
+export const processorHeartbeatEventPayloadSchema = tenantProjectScopeSchema
+  .extend({
+    processorId: uuidV7Schema,
+    agentId: uuidV7Schema,
+    status: processorHealthStatusSchema,
+    activeJobCount: z.number().int().nonnegative().optional(),
+    message: z.string().max(4096).optional(),
+    metrics: metadataSchema.optional(),
+    reportedAt: isoTimestampSchema,
+  })
+  .strict();
+
 export const processorRegistryResponseSchema = z
   .object({
     processor: processorRegistryRecordSchema,
@@ -97,6 +128,7 @@ export const processorRegistryListResponseSchema = z
   })
   .strict();
 
+export type ProcessorHealthStatus = z.infer<typeof processorHealthStatusSchema>;
 export type ProcessorHardware = z.infer<typeof processorHardwareSchema>;
 export type ProcessorCapability = z.infer<typeof processorCapabilitySchema>;
 export type ProcessorLabels = z.infer<typeof processorLabelsSchema>;
@@ -104,6 +136,9 @@ export type ProcessorTags = z.infer<typeof processorTagsSchema>;
 export type RoutingExplanation = z.infer<typeof routingExplanationSchema>;
 export type RegisterProcessorRequest = z.infer<typeof registerProcessorRequestSchema>;
 export type UpdateProcessorCapabilitiesRequest = z.infer<typeof updateProcessorCapabilitiesRequestSchema>;
+export type ProcessorHeartbeatRequest = z.infer<typeof processorHeartbeatRequestSchema>;
+export type ProcessorHeartbeatResponse = z.infer<typeof processorHeartbeatResponseSchema>;
+export type ProcessorHeartbeatEventPayload = z.infer<typeof processorHeartbeatEventPayloadSchema>;
 export type ProcessorRegistryRecord = z.infer<typeof processorRegistryRecordSchema>;
 export type ProcessorRegistryResponse = z.infer<typeof processorRegistryResponseSchema>;
 export type ProcessorRegistryListResponse = z.infer<typeof processorRegistryListResponseSchema>;

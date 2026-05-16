@@ -161,6 +161,18 @@ export const failJobAttemptRequestSchema = z
   })
   .strict();
 
+export const reportJobProgressRequestSchema = z
+  .object({
+    percent: z.number().min(0).max(100).optional(),
+    message: z.string().max(4096).optional(),
+    metadata: metadataSchema.optional(),
+  })
+  .strict()
+  .refine(
+    (progress) => progress.percent !== undefined || progress.message !== undefined || progress.metadata !== undefined,
+    { message: 'Progress report requires percent, message, or metadata' },
+  );
+
 export const claimedJobSchema = z
   .object({
     job: jobRecordSchema,
@@ -232,6 +244,12 @@ export const failJobAttemptResponseSchema = z
   })
   .strict();
 
+export const reportJobProgressResponseSchema = z
+  .object({
+    accepted: z.literal(true),
+  })
+  .strict();
+
 export const jobCreatedEventPayloadSchema = tenantProjectScopeSchema
   .extend({
     jobId: uuidV7Schema,
@@ -291,6 +309,17 @@ export const jobAttemptFailedEventPayloadSchema = tenantProjectScopeSchema
   })
   .strict();
 
+export const jobProgressEventPayloadSchema = tenantProjectScopeSchema
+  .extend({
+    jobId: uuidV7Schema,
+    attemptId: uuidV7Schema,
+    leaseId: uuidV7Schema,
+    agentId: uuidV7Schema,
+    progress: reportJobProgressRequestSchema,
+    reportedAt: isoTimestampSchema,
+  })
+  .strict();
+
 export type JobState = z.infer<typeof jobStateSchema>;
 export type AttemptState = z.infer<typeof attemptStateSchema>;
 export type LeaseState = z.infer<typeof leaseStateSchema>;
@@ -304,6 +333,7 @@ export type ClaimRejection = z.infer<typeof claimRejectionSchema>;
 export type HeartbeatLeaseRequest = z.infer<typeof heartbeatLeaseRequestSchema>;
 export type CompleteJobAttemptRequest = z.infer<typeof completeJobAttemptRequestSchema>;
 export type FailJobAttemptRequest = z.infer<typeof failJobAttemptRequestSchema>;
+export type ReportJobProgressRequest = z.infer<typeof reportJobProgressRequestSchema>;
 export type ClaimedJob = z.infer<typeof claimedJobSchema>;
 export type JobResponse = z.infer<typeof jobResponseSchema>;
 export type JobListResponse = z.infer<typeof jobListResponseSchema>;
@@ -312,9 +342,11 @@ export type ClaimJobResponse = z.infer<typeof claimJobResponseSchema>;
 export type HeartbeatLeaseResponse = z.infer<typeof heartbeatLeaseResponseSchema>;
 export type CompleteJobAttemptResponse = z.infer<typeof completeJobAttemptResponseSchema>;
 export type FailJobAttemptResponse = z.infer<typeof failJobAttemptResponseSchema>;
+export type ReportJobProgressResponse = z.infer<typeof reportJobProgressResponseSchema>;
 export type JobCreatedEventPayload = z.infer<typeof jobCreatedEventPayloadSchema>;
 export type JobReadyEventPayload = z.infer<typeof jobReadyEventPayloadSchema>;
 export type JobClaimedEventPayload = z.infer<typeof jobClaimedEventPayloadSchema>;
 export type JobClaimRejectedEventPayload = z.infer<typeof jobClaimRejectedEventPayloadSchema>;
 export type JobCompletedEventPayload = z.infer<typeof jobCompletedEventPayloadSchema>;
 export type JobAttemptFailedEventPayload = z.infer<typeof jobAttemptFailedEventPayloadSchema>;
+export type JobProgressEventPayload = z.infer<typeof jobProgressEventPayloadSchema>;

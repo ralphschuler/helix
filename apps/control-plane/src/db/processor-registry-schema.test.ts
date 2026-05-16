@@ -37,6 +37,8 @@ describe('processor registry Kysely schema', () => {
       labels_json: labels,
       tags_json: ['gpu', 'image'],
       routing_explanation_json: routingExplanation,
+      last_heartbeat_at: new Date('2026-05-15T14:05:00.000Z'),
+      health_status: 'healthy',
     };
 
     const selected: Selectable<HelixDatabase['processor_registrations']> = {
@@ -49,6 +51,8 @@ describe('processor registry Kysely schema', () => {
       labels_json: labels,
       tags_json: ['gpu', 'image'],
       routing_explanation_json: routingExplanation,
+      last_heartbeat_at: new Date('2026-05-15T14:05:00.000Z'),
+      health_status: 'healthy',
       created_at: new Date('2026-05-15T14:00:00.000Z'),
       updated_at: new Date('2026-05-15T14:01:00.000Z'),
     };
@@ -57,5 +61,6 @@ describe('processor registry Kysely schema', () => {
     expect(selected.project_id).toBe(scope.project_id);
     expect(selected.agent_id).toBe(insert.agent_id);
     expect(selected.routing_explanation_json).toEqual(routingExplanation);
+    expect(selected.health_status).toBe('healthy');
   });
 });

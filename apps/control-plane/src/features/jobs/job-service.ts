@@ -8,6 +8,7 @@ import type {
   FailJobAttemptRequest,
   HeartbeatLeaseRequest,
   JobAttemptRecord,
+  ReportJobProgressRequest,
   JobHistoryResponse,
   JobLeaseRecord,
   JobRecord,
@@ -54,6 +55,10 @@ export interface CompleteJobAttemptInput extends TenantProjectScope {
   readonly jobId: string;
   readonly attemptId: string;
   readonly leaseId: string;
+}
+
+export interface ReportJobProgressInput extends CompleteJobAttemptInput {
+  readonly request: ReportJobProgressRequest;
 }
 
 export interface FailJobAttemptInput extends TenantProjectScope {
@@ -143,6 +148,8 @@ export interface JobRepositoryCompleteAttemptInput extends TenantProjectScope {
   readonly outbox: readonly RuntimeOutboxRecord[];
 }
 
+export type JobRepositoryReportProgressInput = JobRepositoryCompleteAttemptInput;
+
 export interface JobRepositoryFailAttemptInput extends JobRepositoryCompleteAttemptInput {
   readonly failureCode: string;
   readonly failureMessage: string | null;
@@ -175,6 +182,7 @@ export interface JobRepository {
   claimReadyJob(input: JobRepositoryClaimInput): Promise<JobRepositoryClaimResult>;
   recordClaimRejection?(input: JobRepositoryRecordClaimRejectionInput): Promise<void>;
   heartbeatLease(input: JobRepositoryHeartbeatInput): Promise<JobLeaseRecord | null>;
+  reportProgress(input: JobRepositoryReportProgressInput): Promise<boolean>;
   completeJobAttempt(
     input: JobRepositoryCompleteAttemptInput,
   ): Promise<JobRepositoryCompleteAttemptResult>;
@@ -364,6 +372,44 @@ export class JobService {
       agentId: getAgentIdForClaim(authContext),
       now: timestamp,
       leaseExpiresAt: calculateLeaseExpiresAt(input.request, timestamp),
+    });
+  }
+
+  async reportProgress(
+    authContext: AuthContext,
+    input: ReportJobProgressInput,
+  ): Promise<boolean> {
+    assertProjectPermission(authContext, input, 'agents:claim');
+    const timestamp = this.now();
+    const agentId = getAgentIdForClaim(authContext);
+    const event = this.createRuntimeEvent({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: input.jobId,
+      eventType: 'job.progress.reported',
+      payload: {
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        jobId: input.jobId,
+        attemptId: input.attemptId,
+        leaseId: input.leaseId,
+        agentId,
+        progress: sanitizeProgressReport(input.request),
+        reportedAt: timestamp.toISOString(),
+      },
+      timestamp,
+    });
+
+    return this.repository.reportProgress({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      leaseId: input.leaseId,
+      agentId,
+      now: timestamp,
+      events: [event],
+      outbox: [this.createRuntimeOutbox(event, timestamp)],
     });
   }
 
@@ -828,6 +874,19 @@ export class InMemoryJobRepository implements JobRepository {
     this.replaceLease(updatedLease);
 
     return updatedLease;
+  }
+
+  async reportProgress(input: JobRepositoryReportProgressInput): Promise<boolean> {
+    const records = this.findAttemptTransitionRecords(input);
+
+    if (records === null || !canFinishRunningAttempt(records, input.now)) {
+      return false;
+    }
+
+    this.runtimeEvents.push(...input.events);
+    this.runtimeOutbox.push(...input.outbox);
+
+    return true;
   }
 
   async completeJobAttempt(
@@ -1379,6 +1438,58 @@ export class KyselyJobRepository implements JobRepository {
         .executeTakeFirst();
 
       return updatedLease === undefined ? null : toJobLeaseRecord(updatedLease);
+    });
+  }
+
+  async reportProgress(input: JobRepositoryReportProgressInput): Promise<boolean> {
+    return this.db.transaction().execute(async (transaction) => {
+      const lease = await transaction
+        .selectFrom('job_leases')
+        .selectAll()
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('job_id', '=', input.jobId)
+        .where('attempt_id', '=', input.attemptId)
+        .where('id', '=', input.leaseId)
+        .where('agent_id', '=', input.agentId)
+        .where('state', '=', 'active')
+        .where('expires_at', '>', input.now)
+        .executeTakeFirst();
+
+      if (lease === undefined) {
+        return false;
+      }
+
+      const attempt = await transaction
+        .selectFrom('job_attempts')
+        .select(['id'])
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('job_id', '=', input.jobId)
+        .where('id', '=', input.attemptId)
+        .where('state', '=', 'running')
+        .executeTakeFirst();
+      const job = await transaction
+        .selectFrom('jobs')
+        .select(['id'])
+        .where('tenant_id', '=', input.tenantId)
+        .where('project_id', '=', input.projectId)
+        .where('id', '=', input.jobId)
+        .where('state', '=', 'running')
+        .executeTakeFirst();
+
+      if (attempt === undefined || job === undefined) {
+        return false;
+      }
+
+      for (const event of input.events) {
+        await transaction.insertInto('runtime_events').values(toRuntimeEventRow(event)).execute();
+      }
+      for (const outbox of input.outbox) {
+        await transaction.insertInto('runtime_outbox').values(toRuntimeOutboxRow(outbox)).execute();
+      }
+
+      return true;
     });
   }
 
@@ -1940,6 +2051,34 @@ function toRuntimeOutboxRow(outbox: RuntimeOutboxRecord) {
 
 function toDate(value: Date | string): Date {
   return value instanceof Date ? value : new Date(value);
+}
+
+const sensitiveKeyPattern = /(?:secret|token|password|authorization|api[-_]?key)/iu;
+
+function sanitizeProgressReport(progress: ReportJobProgressRequest): ReportJobProgressRequest {
+  return {
+    ...progress,
+    ...(progress.metadata === undefined ? {} : { metadata: sanitizeMetadata(progress.metadata) }),
+  };
+}
+
+function sanitizeMetadata(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      sensitiveKeyPattern.test(key) ? '[redacted]' : sanitizeMetadataValue(nested),
+    ]),
+  );
+}
+
+function sanitizeMetadataValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeMetadataValue);
+  }
+  if (value !== null && typeof value === 'object') {
+    return sanitizeMetadata(value as Record<string, unknown>);
+  }
+  return value;
 }
 
 function toIsoString(value: Date | string): string {

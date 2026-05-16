@@ -23,6 +23,9 @@ import {
   failJobAttemptResponseSchema,
   heartbeatLeaseRequestSchema,
   heartbeatLeaseResponseSchema,
+  jobProgressEventPayloadSchema,
+  reportJobProgressRequestSchema,
+  reportJobProgressResponseSchema,
   idempotencyKeySchema,
   idempotencyKeyScopeSchema,
   jobAttemptRecordSchema,
@@ -45,6 +48,9 @@ import {
   permissionCatalog,
   processorCapabilitySchema,
   processorHardwareSchema,
+  processorHeartbeatEventPayloadSchema,
+  processorHeartbeatRequestSchema,
+  processorHeartbeatResponseSchema,
   processorRegistryListResponseSchema,
   processorRegistryRecordSchema,
   processorRegistryResponseSchema,
@@ -562,6 +568,26 @@ describe('job execution contracts', () => {
     expect(() => createJobRequestSchema.parse({ priority: -1 })).toThrow();
     expect(() => claimJobRequestSchema.parse({ leaseTtlSeconds: 0 })).toThrow();
     expect(() => heartbeatLeaseRequestSchema.parse({ leaseTtlSeconds: 86_401 })).toThrow();
+
+    const progress = {
+      percent: 42,
+      message: 'Rendered frame 42',
+      metadata: { frame: 42 },
+    };
+    expect(reportJobProgressRequestSchema.parse(progress)).toEqual(progress);
+    expect(reportJobProgressResponseSchema.parse({ accepted: true })).toEqual({ accepted: true });
+    expect(jobProgressEventPayloadSchema.parse({
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      jobId: '01890f42-98c4-7cc3-aa5e-0c567f1d3b94',
+      attemptId: '01890f42-98c4-7cc3-aa5e-0c567f1d3b95',
+      leaseId: '01890f42-98c4-7cc3-aa5e-0c567f1d3b96',
+      agentId: '01890f42-98c4-7cc3-aa5e-0c567f1d3b97',
+      progress,
+      reportedAt: '2026-05-15T14:05:00.000Z',
+    })).toMatchObject({ progress });
+    expect(() => reportJobProgressRequestSchema.parse({ percent: 101 })).toThrow();
+    expect(() => reportJobProgressRequestSchema.parse({ message: 'x'.repeat(4097) })).toThrow();
     expect(() => createJobRequestSchema.parse({ rawPayload: 'not allowed' })).toThrow();
   });
 });
@@ -611,10 +637,34 @@ describe('processor registry contracts', () => {
       processor.routingExplanation,
     );
     expect(processorRegistryRecordSchema.parse(processor)).toEqual(processor);
+    const heartbeat = {
+      status: 'healthy' as const,
+      activeJobCount: 2,
+      message: 'processing normally',
+      metrics: { loadAverage: 0.42 },
+    };
+
+    expect(processorHeartbeatRequestSchema.parse(heartbeat)).toEqual(heartbeat);
+    expect(processorHeartbeatResponseSchema.parse({ processor: { ...processor, lastHeartbeatAt: '2026-05-15T14:05:00.000Z', healthStatus: 'healthy' } })).toMatchObject({
+      processor: { lastHeartbeatAt: '2026-05-15T14:05:00.000Z', healthStatus: 'healthy' },
+    });
+    expect(processorHeartbeatEventPayloadSchema.parse({
+      tenantId: validTenantId,
+      projectId: validProjectId,
+      processorId: processor.id,
+      agentId: processor.agentId,
+      status: 'healthy',
+      activeJobCount: 2,
+      message: 'processing normally',
+      metrics: { loadAverage: 0.42 },
+      reportedAt: '2026-05-15T14:05:00.000Z',
+    })).toMatchObject({ status: 'healthy', activeJobCount: 2 });
     expect(processorRegistryResponseSchema.parse({ processor })).toEqual({ processor });
     expect(processorRegistryListResponseSchema.parse({ processors: [processor] })).toEqual({
       processors: [processor],
     });
+    expect(() => processorHeartbeatRequestSchema.parse({ status: 'lost' })).toThrow();
+    expect(() => processorHeartbeatRequestSchema.parse({ activeJobCount: -1 })).toThrow();
     expect(() => processorRegistryRecordSchema.parse({ ...processor, projectId: undefined })).toThrow();
     expect(() => processorRegistryRecordSchema.parse({ ...processor, capabilities: [] })).toThrow();
     expect(() =>
