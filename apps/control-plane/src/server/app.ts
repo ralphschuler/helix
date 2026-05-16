@@ -33,6 +33,7 @@ import {
   StripeWebhookSignatureError,
 } from '../features/billing/stripe-adapter.js';
 import type { BillingWebhookHandler } from '../features/billing/stripe-webhook.js';
+import type { RuntimeEventStoreProjection, RuntimeEventStoreRow } from '../features/runtime/event-store.js';
 import {
   createDefaultBrowserAuthProvider,
   hasValidCsrfToken,
@@ -133,6 +134,7 @@ export interface CreateAppOptions {
   readonly workflowService?: WorkflowService;
   readonly scheduleService?: ScheduleService;
   readonly processorRegistryService?: ProcessorRegistryService;
+  readonly runtimeEventStore?: RuntimeEventStoreProjection;
 }
 
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -156,6 +158,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
   const workflowService = options.workflowService;
   const scheduleService = options.scheduleService;
   const processorRegistryService = options.processorRegistryService;
+  const runtimeEventStore = options.runtimeEventStore;
 
   app.get('/health', (context) =>
     context.json({
@@ -413,6 +416,62 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
 
       return context.json({ workflow });
     } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.get('/api/v1/workflows/:workflowId/stream', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    if (runtimeEventStore === undefined) {
+      return context.json({ error: 'runtime_event_store_not_configured' }, 503);
+    }
+
+    const workflowId = uuidV7Schema.safeParse(context.req.param('workflowId'));
+
+    if (!workflowId.success) {
+      return context.json({ error: 'invalid_workflow_id' }, 400);
+    }
+
+    const limit = parsePositiveIntegerQuery(context.req.query('limit') ?? null, 100, 500);
+
+    if (limit === null) {
+      return context.json({ error: 'invalid_limit' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const workflow = await workflowService.getWorkflow(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+      });
+
+      if (workflow === null) {
+        return context.json({ error: 'workflow_not_found' }, 404);
+      }
+
+      const result = await runtimeEventStore.list({
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+        after: context.req.query('cursor') ?? null,
+        limit,
+      });
+
+      return new Response(formatSseEvents(result.events), {
+        headers: {
+          'cache-control': 'no-cache',
+          'content-type': 'text/event-stream; charset=utf-8',
+        },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Invalid runtime event cursor.') {
+        return context.json({ error: 'invalid_cursor' }, 400);
+      }
+
       return handleWorkflowApiError(context, error);
     }
   });
@@ -1647,6 +1706,34 @@ function getStringArrayField(body: Record<string, unknown>, field: string): read
   }
 
   return value as string[];
+}
+
+function parsePositiveIntegerQuery(value: string | null, defaultValue: number, maxValue: number): number | null {
+  if (value === null) {
+    return defaultValue;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= maxValue ? parsed : null;
+}
+
+function formatSseEvents(events: readonly RuntimeEventStoreRow[]): string {
+  return events
+    .map((event) => [
+      `id: ${event.cursor}`,
+      `event: ${event.eventType}`,
+      `data: ${JSON.stringify({
+        id: event.eventId,
+        type: event.eventType,
+        version: event.eventVersion,
+        orderingKey: event.orderingKey,
+        payload: event.payload,
+        occurredAt: event.occurredAt.toISOString(),
+        recordedAt: event.recordedAt.toISOString(),
+      })}`,
+      '',
+    ].join('\n'))
+    .join('\n');
 }
 
 function handleScheduleApiError(
