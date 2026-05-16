@@ -15,6 +15,7 @@ import {
 } from './features/workflows/workflow-service.js';
 import { InMemoryJobRepository, JobService } from './features/jobs/job-service.js';
 import { createApp, type ApiAuthProvider } from './server/app.js';
+import type { SecurityAuditEvent, SecurityAuditSink } from './features/iam/security-audit.js';
 
 const tenantId = '01890f42-98c4-7cc3-8a5e-0c567f1d3a77';
 const projectId = '01890f42-98c4-7cc3-9a5e-0c567f1d3a78';
@@ -42,6 +43,14 @@ function createFixedApiAuthProvider(authContext: AuthContext | null): ApiAuthPro
       return authContext;
     },
   };
+}
+
+class RecordingAuditSink implements SecurityAuditSink {
+  readonly events: SecurityAuditEvent[] = [];
+
+  async record(event: SecurityAuditEvent): Promise<void> {
+    this.events.push(event);
+  }
 }
 
 function createIdGenerator(ids: readonly string[]): () => string {
@@ -272,6 +281,256 @@ describe('workflow API', () => {
       `workflow-step:${first?.run.id}:extract`,
       `workflow-step:${first?.run.id}:transform`,
     ]);
+  });
+
+  it('pauses and resumes workflow runs through the public API with audit and delayed step activation', async () => {
+    const workflowRepository = new InMemoryWorkflowRepository();
+    const jobRepository = new InMemoryJobRepository();
+    const auditSink = new RecordingAuditSink();
+    const jobService = new JobService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d11',
+      ]),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: jobRepository,
+    });
+    const service = new WorkflowService({
+      auditSink,
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d11',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d12',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d13',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d14',
+      ]),
+      jobActivator: async ({ idempotencyKey, request, scope }) => jobService.createJob(
+        { ...workflowAuth, permissions: [...workflowAuth.permissions, 'jobs:create'] },
+        { ...scope, idempotencyKey, request },
+      ),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: workflowRepository,
+    });
+    const app = createApp({ apiAuthProvider: createFixedApiAuthProvider(workflowAuth), workflowService: service });
+    const unauthorizedApp = createApp({
+      apiAuthProvider: createFixedApiAuthProvider({
+        ...workflowAuth,
+        permissions: workflowAuth.permissions.filter((permission) => permission !== 'workflows:start'),
+      }),
+      workflowService: service,
+    });
+    const workflow = await service.createWorkflow(workflowAuth, {
+      tenantId,
+      projectId,
+      request: {
+        slug: 'pause-resume',
+        name: 'Pause Resume',
+        draftGraph: {
+          nodes: [{ id: 'extract', type: 'job' }, { id: 'transform', type: 'job' }],
+          edges: [{ from: 'extract', to: 'transform' }],
+        },
+      },
+    });
+    await service.publishWorkflow(workflowAuth, { tenantId, projectId, workflowId: workflow.id });
+    const started = await service.startRun(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      idempotencyKey: 'workflow-run:pause-1',
+      request: {},
+    });
+    const runId = started?.run.id ?? '';
+
+    const unauthorizedPauseResponse = await unauthorizedApp.request(`/api/v1/workflows/${workflow.id}/runs/${runId}/pause`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
+    const unauthorizedResumeResponse = await unauthorizedApp.request(`/api/v1/workflows/${workflow.id}/runs/${runId}/resume`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
+    const pauseResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs/${runId}/pause`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
+    const paused = workflowRunResponseSchema.parse(await pauseResponse.json());
+
+    await service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId,
+      stepId: 'extract',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+    });
+
+    expect(unauthorizedPauseResponse.status).toBe(403);
+    expect(unauthorizedResumeResponse.status).toBe(403);
+    expect(pauseResponse.status).toBe(200);
+    expect(paused.run).toMatchObject({ id: runId, state: 'paused' });
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'extract', state: 'completed', jobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10' }),
+      expect.objectContaining({ stepId: 'transform', state: 'pending', jobId: null }),
+    ]));
+    expect(jobRepository.jobs.map((job) => job.idempotencyKey)).toEqual([`workflow-step:${runId}:extract`]);
+
+    const resumeResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs/${runId}/resume`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
+    const resumed = workflowRunResponseSchema.parse(await resumeResponse.json());
+
+    expect(resumeResponse.status).toBe(200);
+    expect(resumed.run).toMatchObject({ id: runId, state: 'running' });
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'transform', state: 'running', jobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d11' }),
+    ]));
+    expect(jobRepository.jobs.map((job) => job.idempotencyKey)).toEqual([
+      `workflow-step:${runId}:extract`,
+      `workflow-step:${runId}:transform`,
+    ]);
+    expect(auditSink.events).toEqual([
+      expect.objectContaining({ action: 'workflow.run.paused', resourceType: 'workflow_run', resourceId: runId }),
+      expect.objectContaining({ action: 'workflow.run.resumed', resourceType: 'workflow_run', resourceId: runId }),
+    ]);
+  });
+
+  it('checks latest run state before activating newly ready steps after completion', async () => {
+    class PausingWorkflowRepository extends InMemoryWorkflowRepository {
+      override async updateStep(input: Parameters<InMemoryWorkflowRepository['updateStep']>[0]) {
+        const updated = await super.updateStep(input);
+
+        if (updated?.stepId === 'extract' && updated.state === 'completed') {
+          const run = this.runs.find((candidate) => candidate.id === updated.runId);
+          if (run !== undefined) {
+            await this.updateRunState({
+              tenantId: run.tenantId,
+              projectId: run.projectId,
+              workflowId: run.workflowId,
+              runId: run.id,
+              state: 'paused',
+              updatedAt: input.updatedAt,
+            });
+          }
+        }
+
+        return updated;
+      }
+    }
+
+    const workflowRepository = new PausingWorkflowRepository();
+    const jobRepository = new InMemoryJobRepository();
+    const jobService = new JobService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d11',
+      ]),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: jobRepository,
+    });
+    const service = new WorkflowService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d11',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d12',
+      ]),
+      jobActivator: async ({ idempotencyKey, request, scope }) => jobService.createJob(
+        { ...workflowAuth, permissions: [...workflowAuth.permissions, 'jobs:create'] },
+        { ...scope, idempotencyKey, request },
+      ),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: workflowRepository,
+    });
+    const workflow = await service.createWorkflow(workflowAuth, {
+      tenantId,
+      projectId,
+      request: {
+        slug: 'pause-race',
+        name: 'Pause Race',
+        draftGraph: {
+          nodes: [{ id: 'extract', type: 'job' }, { id: 'transform', type: 'job' }],
+          edges: [{ from: 'extract', to: 'transform' }],
+        },
+      },
+    });
+    await service.publishWorkflow(workflowAuth, { tenantId, projectId, workflowId: workflow.id });
+    const started = await service.startRun(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      idempotencyKey: 'workflow-run:pause-race-1',
+      request: {},
+    });
+    const runId = started?.run.id ?? '';
+
+    await service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId,
+      stepId: 'extract',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+    });
+
+    expect(workflowRepository.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: runId, state: 'paused' }),
+    ]));
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'transform', state: 'pending', jobId: null }),
+    ]));
+    expect(jobRepository.jobs.map((job) => job.idempotencyKey)).toEqual([`workflow-step:${runId}:extract`]);
+  });
+
+  it('does not reactivate terminal workflow runs through pause and resume controls', async () => {
+    const { app, repository, service } = createWorkflowsApp();
+    const workflow = await service.createWorkflow(workflowAuth, {
+      tenantId,
+      projectId,
+      request: {
+        slug: 'terminal-pause',
+        name: 'Terminal Pause',
+        draftGraph: { nodes: [{ id: 'done', type: 'job' }], edges: [] },
+      },
+    });
+    await service.publishWorkflow(workflowAuth, { tenantId, projectId, workflowId: workflow.id });
+    const started = await service.startRun(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      idempotencyKey: 'workflow-run:terminal-pause-1',
+      request: {},
+    });
+    const runId = started?.run.id ?? '';
+    await repository.updateRunState({
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId,
+      state: 'completed',
+      updatedAt: '2026-05-15T13:00:00.000Z',
+    });
+
+    const pauseResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs/${runId}/pause`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
+    const paused = workflowRunResponseSchema.parse(await pauseResponse.json());
+    const resumeResponse = await app.request(`/api/v1/workflows/${workflow.id}/runs/${runId}/resume`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
+    const resumed = workflowRunResponseSchema.parse(await resumeResponse.json());
+
+    expect(pauseResponse.status).toBe(200);
+    expect(resumeResponse.status).toBe(200);
+    expect(paused.run.state).toBe('completed');
+    expect(resumed.run.state).toBe('completed');
   });
 
   it('puts ready wait_signal steps into waiting_for_signal and resumes them once through the public signal API', async () => {

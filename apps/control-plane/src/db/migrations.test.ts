@@ -187,6 +187,21 @@ describe('database migration runner', () => {
     ).resolves.toBe(timerMigration?.sql);
   });
 
+  it('ships paused workflow run state migration', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const pauseMigration = migrations.find(
+      (migration) => migration.id === '0013_workflow_run_paused_state',
+    );
+
+    expect(pauseMigration).toBeDefined();
+    expect(pauseMigration?.sql).toContain('workflow_runs_state_check');
+    expect(pauseMigration?.sql).toContain("'paused'");
+
+    await expect(
+      readFile(path.join(getDefaultMigrationsDirectory(), '0013_workflow_run_paused_state.sql'), 'utf8'),
+    ).resolves.toBe(pauseMigration?.sql);
+  });
+
   it('ships processor registry schema with scoped capabilities and routing explanations', async () => {
     const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
     const processorMigration = migrations.find(

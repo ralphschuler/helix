@@ -52,6 +52,7 @@ function createDefaultAppOptions(): CreateAppOptions {
 
   const runtimeServices: { jobService?: JobService } = {};
   const workflowService = new WorkflowService({
+    auditSink,
     jobActivator: async ({ idempotencyKey, request, scope }) => {
       if (runtimeServices.jobService === undefined) {
         throw new Error('Job service is not configured.');

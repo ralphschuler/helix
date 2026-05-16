@@ -42,7 +42,7 @@ export const workflowRunRecordSchema = tenantProjectScopeSchema
     id: uuidV7Schema,
     workflowId: uuidV7Schema,
     workflowVersionId: uuidV7Schema,
-    state: z.enum(['queued', 'running', 'completed', 'failed', 'canceled']),
+    state: z.enum(['queued', 'running', 'paused', 'completed', 'failed', 'canceled']),
     idempotencyKey: idempotencyKeySchema,
     createdAt: isoTimestampSchema,
     updatedAt: isoTimestampSchema,
@@ -97,6 +97,9 @@ export const startWorkflowRunRequestSchema = z
     workflowVersionId: uuidV7Schema.optional(),
   })
   .strict();
+
+export const pauseWorkflowRunRequestSchema = z.object({}).strict();
+export const resumeWorkflowRunRequestSchema = z.object({}).strict();
 
 export const deliverWorkflowSignalRequestSchema = z
   .object({
@@ -164,6 +167,8 @@ export type CreateWorkflowRequest = z.infer<typeof createWorkflowRequestSchema>;
 export type UpdateWorkflowDraftRequest = z.infer<typeof updateWorkflowDraftRequestSchema>;
 export type PublishWorkflowRequest = z.infer<typeof publishWorkflowRequestSchema>;
 export type StartWorkflowRunRequest = z.infer<typeof startWorkflowRunRequestSchema>;
+export type PauseWorkflowRunRequest = z.infer<typeof pauseWorkflowRunRequestSchema>;
+export type ResumeWorkflowRunRequest = z.infer<typeof resumeWorkflowRunRequestSchema>;
 export type DeliverWorkflowSignalRequest = z.infer<typeof deliverWorkflowSignalRequestSchema>;
 export type WorkflowSignalResponse = z.infer<typeof workflowSignalResponseSchema>;
 export type WorkflowRunStartedEventPayload = z.infer<typeof workflowRunStartedEventPayloadSchema>;

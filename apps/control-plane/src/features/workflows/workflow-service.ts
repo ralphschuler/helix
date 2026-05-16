@@ -17,6 +17,7 @@ import type {
 import type { HelixDatabase } from '../../db/schema.js';
 import { assertProjectPermission } from '../iam/authorization.js';
 import { randomUuidV7LikeId } from '../iam/token-secrets.js';
+import type { SecurityAuditSink } from '../iam/security-audit.js';
 import type {
   RuntimeEventRecord,
   RuntimeOutboxRecord,
@@ -73,6 +74,12 @@ export interface WorkflowRepository {
   findRunByIdempotencyKey(input: TenantProjectScope & { readonly workflowId: string; readonly idempotencyKey: string }): Promise<WorkflowRunRecord | null>;
   listRunSteps(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowStepRecord[]>;
   listRunStepDependencies(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowStepDependencyRecord[]>;
+  updateRunState(input: TenantProjectScope & {
+    readonly workflowId: string;
+    readonly runId: string;
+    readonly state: WorkflowRunRecord['state'];
+    readonly updatedAt: string;
+  }): Promise<WorkflowRunRecord | null>;
   updateStep(input: TenantProjectScope & {
     readonly runId: string;
     readonly stepId: string;
@@ -102,6 +109,7 @@ export type WorkflowJobActivator = (input: WorkflowJobActivationInput) => Promis
 export interface WorkflowServiceOptions {
   readonly repository: WorkflowRepository;
   readonly jobActivator?: WorkflowJobActivator;
+  readonly auditSink?: SecurityAuditSink;
   readonly now?: () => Date;
   readonly generateId?: () => string;
 }
@@ -160,12 +168,14 @@ interface ParsedWorkflowGraph {
 export class WorkflowService {
   private readonly repository: WorkflowRepository;
   private readonly jobActivator: WorkflowJobActivator | undefined;
+  private readonly auditSink: SecurityAuditSink;
   private readonly now: () => Date;
   private readonly generateId: () => string;
 
   constructor(options: WorkflowServiceOptions) {
     this.repository = options.repository;
     this.jobActivator = options.jobActivator;
+    this.auditSink = options.auditSink ?? new NoopSecurityAuditSink();
     this.now = options.now ?? (() => new Date());
     this.generateId = options.generateId ?? (() => randomUuidV7LikeId(this.now()));
   }
@@ -446,6 +456,51 @@ export class WorkflowService {
     return { completed: completedCount };
   }
 
+  async pauseRun(
+    authContext: AuthContext,
+    input: TenantProjectScope & { readonly workflowId: string; readonly runId: string },
+  ): Promise<WorkflowRunRecord | null> {
+    assertProjectPermission(authContext, input, 'workflows:start');
+
+    const run = await this.repository.findRun(input);
+
+    if (run === null) {
+      return null;
+    }
+
+    if (run.state === 'paused' || isTerminalWorkflowRunState(run.state)) {
+      return run;
+    }
+
+    const now = this.now();
+    const paused = await this.repository.updateRunState({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      workflowId: input.workflowId,
+      runId: input.runId,
+      state: 'paused',
+      updatedAt: now.toISOString(),
+    });
+
+    if (paused === null) {
+      return null;
+    }
+
+    await this.auditSink.record({
+      id: this.generateId(),
+      tenantId: paused.tenantId,
+      projectId: paused.projectId,
+      actor: authContext.principal,
+      action: 'workflow.run.paused',
+      resourceType: 'workflow_run',
+      resourceId: paused.id,
+      metadata: { workflowId: paused.workflowId, workflowVersionId: paused.workflowVersionId },
+      occurredAt: now,
+    });
+
+    return paused;
+  }
+
   async resumeRun(
     authContext: AuthContext,
     input: TenantProjectScope & { readonly workflowId: string; readonly runId: string },
@@ -458,10 +513,43 @@ export class WorkflowService {
       return null;
     }
 
-    await this.activateInitialReadySteps(run);
-    await this.activateNewlyReadyJobSteps(run);
+    const resumed = run.state === 'paused'
+      ? await this.repository.updateRunState({
+          tenantId: input.tenantId,
+          projectId: input.projectId,
+          workflowId: input.workflowId,
+          runId: input.runId,
+          state: 'running',
+          updatedAt: this.now().toISOString(),
+        })
+      : run;
 
-    return run;
+    if (isTerminalWorkflowRunState(run.state)) {
+      return run;
+    }
+
+    if (resumed === null) {
+      return null;
+    }
+
+    if (run.state === 'paused') {
+      await this.auditSink.record({
+        id: this.generateId(),
+        tenantId: resumed.tenantId,
+        projectId: resumed.projectId,
+        actor: authContext.principal,
+        action: 'workflow.run.resumed',
+        resourceType: 'workflow_run',
+        resourceId: resumed.id,
+        metadata: { workflowId: resumed.workflowId, workflowVersionId: resumed.workflowVersionId },
+        occurredAt: new Date(resumed.updatedAt),
+      });
+    }
+
+    await this.activateInitialReadySteps(resumed);
+    await this.activateNewlyReadyJobSteps(resumed);
+
+    return resumed;
   }
 
   async startRun(
@@ -569,6 +657,17 @@ export class WorkflowService {
   }
 
   private async activateInitialReadySteps(run: WorkflowRunRecord): Promise<void> {
+    const currentRun = await this.repository.findRun({
+      tenantId: run.tenantId,
+      projectId: run.projectId,
+      workflowId: run.workflowId,
+      runId: run.id,
+    });
+
+    if (currentRun === null || currentRun.state === 'paused' || isTerminalWorkflowRunState(currentRun.state)) {
+      return;
+    }
+
     const steps = await this.repository.listRunSteps({
       tenantId: run.tenantId,
       projectId: run.projectId,
@@ -581,6 +680,17 @@ export class WorkflowService {
   }
 
   private async activateNewlyReadyJobSteps(run: WorkflowRunRecord): Promise<void> {
+    const currentRun = await this.repository.findRun({
+      tenantId: run.tenantId,
+      projectId: run.projectId,
+      workflowId: run.workflowId,
+      runId: run.id,
+    });
+
+    if (currentRun === null || currentRun.state === 'paused' || isTerminalWorkflowRunState(currentRun.state)) {
+      return;
+    }
+
     const scope = { tenantId: run.tenantId, projectId: run.projectId, runId: run.id };
     const dependencies = await this.repository.listRunStepDependencies(scope);
     let steps = await this.repository.listRunSteps(scope);
@@ -754,6 +864,12 @@ export class WorkflowService {
   }
 }
 
+class NoopSecurityAuditSink implements SecurityAuditSink {
+  async record(): Promise<void> {
+    return;
+  }
+}
+
 export class InMemoryWorkflowRepository implements WorkflowRepository {
   readonly workflows: WorkflowDefinitionRecord[] = [];
   readonly versions: WorkflowVersionRecord[] = [];
@@ -895,6 +1011,36 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
           dependency.runId === input.runId,
       )
       .map(cloneStepDependency);
+  }
+
+  async updateRunState(input: TenantProjectScope & {
+    readonly workflowId: string;
+    readonly runId: string;
+    readonly state: WorkflowRunRecord['state'];
+    readonly updatedAt: string;
+  }): Promise<WorkflowRunRecord | null> {
+    const index = this.runs.findIndex(
+      (run) =>
+        run.tenantId === input.tenantId &&
+        run.projectId === input.projectId &&
+        run.workflowId === input.workflowId &&
+        run.id === input.runId,
+    );
+
+    if (index === -1) {
+      return null;
+    }
+
+    const current = this.runs[index];
+
+    if (current === undefined) {
+      return null;
+    }
+
+    const updated: WorkflowRunRecord = { ...current, state: input.state, updatedAt: input.updatedAt };
+    this.runs[index] = cloneRun(updated);
+
+    return cloneRun(updated);
   }
 
   async updateStep(input: TenantProjectScope & {
@@ -1109,6 +1255,25 @@ export class KyselyWorkflowRepository implements WorkflowRepository {
     return rows.map(toWorkflowStepDependencyRecord);
   }
 
+  async updateRunState(input: TenantProjectScope & {
+    readonly workflowId: string;
+    readonly runId: string;
+    readonly state: WorkflowRunRecord['state'];
+    readonly updatedAt: string;
+  }): Promise<WorkflowRunRecord | null> {
+    const row = await this.db
+      .updateTable('workflow_runs')
+      .set({ state: input.state, updated_at: input.updatedAt })
+      .where('tenant_id', '=', input.tenantId)
+      .where('project_id', '=', input.projectId)
+      .where('workflow_id', '=', input.workflowId)
+      .where('id', '=', input.runId)
+      .returningAll()
+      .executeTakeFirst();
+
+    return row === undefined ? null : toWorkflowRunRecord(row);
+  }
+
   async updateStep(input: TenantProjectScope & {
     readonly runId: string;
     readonly stepId: string;
@@ -1236,6 +1401,10 @@ function findInitialReadyStepIds(graph: ParsedWorkflowGraph): ReadonlySet<string
       .filter((node) => (node.type === 'job' || node.type === 'wait_signal' || node.type === 'timer') && !blockedStepIds.has(node.id))
       .map((node) => node.id),
   );
+}
+
+function isTerminalWorkflowRunState(state: WorkflowRunRecord['state']): boolean {
+  return state === 'completed' || state === 'failed' || state === 'canceled';
 }
 
 function getReadyStepState(type: WorkflowStepType): WorkflowStepRecord['state'] {
