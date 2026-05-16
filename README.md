@@ -37,6 +37,10 @@ docker compose down
 
 Use `docker compose down -v` only when you intentionally want to delete local Postgres and Redpanda volumes.
 
+## Workflow recovery assumptions
+
+Workflow recovery treats Postgres-backed workflow runs, steps, and dependencies as authoritative state. A runtime restart may recreate service instances over the same durable store and call the workflow resume path to activate persisted `running` job steps and any `pending` steps whose dependencies are already complete. Step jobs use idempotency keys of the form `workflow-step:<runId>:<stepId>`, so recovery retries do not duplicate completed or already activated work. Runtime events/outbox records remain derived from durable state; recovery must not emit a second `workflow.run.started` event for the same run.
+
 ## Commands
 
 ```sh

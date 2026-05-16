@@ -318,6 +318,24 @@ export class WorkflowService {
     return completed;
   }
 
+  async resumeRun(
+    authContext: AuthContext,
+    input: TenantProjectScope & { readonly workflowId: string; readonly runId: string },
+  ): Promise<WorkflowRunRecord | null> {
+    assertProjectPermission(authContext, input, 'workflows:start');
+
+    const run = await this.repository.findRun(input);
+
+    if (run === null) {
+      return null;
+    }
+
+    await this.activateInitialReadyJobSteps(run);
+    await this.activateNewlyReadyJobSteps(run);
+
+    return run;
+  }
+
   async startRun(
     authContext: AuthContext,
     input: TenantProjectScope & {
