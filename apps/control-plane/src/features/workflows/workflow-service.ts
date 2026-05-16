@@ -436,33 +436,67 @@ export class WorkflowService {
 
   private async activateNewlyReadyJobSteps(run: WorkflowRunRecord): Promise<void> {
     const scope = { tenantId: run.tenantId, projectId: run.projectId, runId: run.id };
-    const [steps, dependencies] = await Promise.all([
-      this.repository.listRunSteps(scope),
-      this.repository.listRunStepDependencies(scope),
-    ]);
-    const completedStepIds = new Set(steps
-      .filter((step) => step.state === 'completed')
-      .map((step) => step.stepId));
+    const dependencies = await this.repository.listRunStepDependencies(scope);
+    let steps = await this.repository.listRunSteps(scope);
+    let progressed = true;
 
-    for (const step of steps.filter((candidate) => candidate.type === 'job' && candidate.state === 'pending')) {
-      const incoming = dependencies.filter((dependency) => dependency.toStepId === step.stepId);
-      const isReady = incoming.length > 0 && incoming.every((dependency) => completedStepIds.has(dependency.fromStepId));
+    while (progressed) {
+      progressed = false;
+      const completedStepIds = new Set(steps
+        .filter((step) => step.state === 'completed')
+        .map((step) => step.stepId));
 
-      if (!isReady) {
-        continue;
-      }
+      for (const step of steps.filter((candidate) => candidate.state === 'pending')) {
+        const incoming = dependencies.filter((dependency) => dependency.toStepId === step.stepId);
+        const isReady = incoming.length > 0 && incoming.every((dependency) => completedStepIds.has(dependency.fromStepId));
 
-      const running = await this.repository.updateStep({
-        tenantId: run.tenantId,
-        projectId: run.projectId,
-        runId: run.id,
-        stepId: step.stepId,
-        state: transitionWorkflowStepState(step.state, 'running'),
-        updatedAt: this.now().toISOString(),
-      });
+        if (!isReady) {
+          continue;
+        }
 
-      if (running !== null) {
-        await this.activateJobStep(run, running);
+        if (step.type === 'job') {
+          const running = await this.repository.updateStep({
+            tenantId: run.tenantId,
+            projectId: run.projectId,
+            runId: run.id,
+            stepId: step.stepId,
+            state: transitionWorkflowStepState(step.state, 'running'),
+            updatedAt: this.now().toISOString(),
+          });
+
+          if (running !== null) {
+            await this.activateJobStep(run, running);
+            steps = await this.repository.listRunSteps(scope);
+            progressed = true;
+          }
+        }
+
+        if (step.type === 'join') {
+          const running = await this.repository.updateStep({
+            tenantId: run.tenantId,
+            projectId: run.projectId,
+            runId: run.id,
+            stepId: step.stepId,
+            state: transitionWorkflowStepState(step.state, 'running'),
+            updatedAt: this.now().toISOString(),
+          });
+
+          if (running !== null) {
+            const completed = await this.repository.updateStep({
+              tenantId: run.tenantId,
+              projectId: run.projectId,
+              runId: run.id,
+              stepId: step.stepId,
+              state: transitionWorkflowStepState(running.state, 'completed'),
+              updatedAt: this.now().toISOString(),
+            });
+
+            if (completed !== null) {
+              steps = await this.repository.listRunSteps(scope);
+              progressed = true;
+            }
+          }
+        }
       }
     }
   }
