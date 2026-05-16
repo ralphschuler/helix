@@ -18,6 +18,7 @@ SaaS API, control-plane application, and v1 `/admin` UI shell.
 - Project API key-authenticated job API for creating/listing/statusing tenant/project-scoped jobs with idempotent creation and runtime outbox events.
 - Retry/DLQ job behavior: exhausted failed attempts or expired leases transition jobs to `dead_lettered`, while attempt and lease history remains inspectable.
 - Agent token-authenticated processor registration API for outbound processor capability updates with scoped audit events.
+- Workflow checkpoint persistence model for tenant/project-scoped replay audit refs, immutable sequence ordering, and retention targeting metadata.
 
 ## Commands
 
@@ -31,6 +32,7 @@ yarn workspace @helix/control-plane test -- jobs
 yarn workspace @helix/control-plane test -- processors
 yarn workspace @helix/control-plane test -- outbox
 yarn workspace @helix/control-plane test -- inbox
+yarn workspace @helix/control-plane test -- workflow-checkpoints
 yarn workspace @helix/control-plane check
 yarn workspace @helix/control-plane lint
 ```

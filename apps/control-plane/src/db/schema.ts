@@ -322,6 +322,22 @@ export interface WorkflowStepDependenciesTable {
   created_at: TimestampColumn;
 }
 
+export interface WorkflowCheckpointsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  workflow_id: string;
+  workflow_version_id: string;
+  run_id: string;
+  step_id: string;
+  sequence: number;
+  payload_ref: string;
+  state_digest: string;
+  metadata_json: JsonColumn;
+  retained_until: NullableTimestampColumn;
+  created_at: TimestampColumn;
+}
+
 export interface JobsTable {
   id: string;
   tenant_id: string;
@@ -409,6 +425,7 @@ export interface HelixDatabase {
   workflow_runs: WorkflowRunsTable;
   workflow_steps: WorkflowStepsTable;
   workflow_step_dependencies: WorkflowStepDependenciesTable;
+  workflow_checkpoints: WorkflowCheckpointsTable;
   jobs: JobsTable;
   job_attempts: JobAttemptsTable;
   job_leases: JobLeasesTable;
