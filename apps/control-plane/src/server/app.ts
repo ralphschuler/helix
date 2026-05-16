@@ -5,6 +5,7 @@ import {
   completeJobAttemptRequestSchema,
   createJobRequestSchema,
   createWorkflowRequestSchema,
+  completeWorkflowApprovalRequestSchema,
   createScheduleRequestSchema,
   deliverWorkflowSignalRequestSchema,
   failJobAttemptRequestSchema,
@@ -738,6 +739,60 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
 
       if (result === null) {
         return context.json({ error: 'workflow_signal_not_found' }, 404);
+      }
+
+      return context.json({ step: result.step, duplicate: result.duplicate }, result.duplicate ? 200 : 202);
+    } catch (error) {
+      return handleWorkflowApiError(context, error);
+    }
+  });
+
+  app.post('/api/v1/workflows/:workflowId/runs/:runId/approvals/:stepId', async (context) => {
+    if (workflowService === undefined) {
+      return context.json({ error: 'workflow_service_not_configured' }, 503);
+    }
+
+    const workflowId = uuidV7Schema.safeParse(context.req.param('workflowId'));
+    const runId = uuidV7Schema.safeParse(context.req.param('runId'));
+    const stepId = context.req.param('stepId');
+
+    if (!workflowId.success) {
+      return context.json({ error: 'invalid_workflow_id' }, 400);
+    }
+
+    if (!runId.success) {
+      return context.json({ error: 'invalid_workflow_run_id' }, 400);
+    }
+
+    if (stepId.trim().length === 0) {
+      return context.json({ error: 'invalid_workflow_step_id' }, 400);
+    }
+
+    const body = await readJsonObject(context);
+
+    if (!body.ok) {
+      return context.json({ error: body.error }, 400);
+    }
+
+    const request = completeWorkflowApprovalRequestSchema.safeParse(body.value);
+
+    if (!request.success) {
+      return context.json({ error: 'invalid_workflow_approval_request' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      const result = await workflowService.completeApproval(authContext, {
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: workflowId.data,
+        runId: runId.data,
+        stepId,
+        request: request.data,
+      });
+
+      if (result === null) {
+        return context.json({ error: 'workflow_approval_not_found' }, 404);
       }
 
       return context.json({ step: result.step, duplicate: result.duplicate }, result.duplicate ? 200 : 202);

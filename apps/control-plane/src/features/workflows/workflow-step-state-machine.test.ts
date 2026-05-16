@@ -6,6 +6,7 @@ describe('workflow step state machine', () => {
   it('rejects invalid workflow step transitions', () => {
     expect(() => transitionWorkflowStepState('pending', 'completed')).toThrow(/Invalid workflow step transition/);
     expect(() => transitionWorkflowStepState('waiting_for_signal', 'running')).toThrow(/Invalid workflow step transition/);
+    expect(() => transitionWorkflowStepState('waiting_for_approval', 'running')).toThrow(/Invalid workflow step transition/);
     expect(() => transitionWorkflowStepState('waiting_for_timer', 'running')).toThrow(/Invalid workflow step transition/);
     expect(() => transitionWorkflowStepState('completed', 'running')).toThrow(/Invalid workflow step transition/);
   });
@@ -13,10 +14,13 @@ describe('workflow step state machine', () => {
   it('allows ready, terminal, and idempotent terminal workflow step transitions', () => {
     expect(transitionWorkflowStepState('pending', 'running')).toBe('running');
     expect(transitionWorkflowStepState('pending', 'waiting_for_signal')).toBe('waiting_for_signal');
+    expect(transitionWorkflowStepState('pending', 'waiting_for_approval')).toBe('waiting_for_approval');
     expect(transitionWorkflowStepState('pending', 'waiting_for_timer')).toBe('waiting_for_timer');
     expect(transitionWorkflowStepState('waiting_for_signal', 'completed')).toBe('completed');
+    expect(transitionWorkflowStepState('waiting_for_approval', 'completed')).toBe('completed');
     expect(transitionWorkflowStepState('waiting_for_timer', 'completed')).toBe('completed');
     expect(transitionWorkflowStepState('waiting_for_signal', 'waiting_for_signal')).toBe('waiting_for_signal');
+    expect(transitionWorkflowStepState('waiting_for_approval', 'waiting_for_approval')).toBe('waiting_for_approval');
     expect(transitionWorkflowStepState('running', 'completed')).toBe('completed');
     expect(transitionWorkflowStepState('completed', 'completed')).toBe('completed');
     expect(transitionWorkflowStepState('running', 'failed')).toBe('failed');

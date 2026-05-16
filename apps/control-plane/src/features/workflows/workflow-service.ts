@@ -1,6 +1,7 @@
 import type { Kysely, Selectable } from 'kysely';
 import type {
   AuthContext,
+  CompleteWorkflowApprovalRequest,
   CreateJobRequest,
   CreateWorkflowRequest,
   DeliverWorkflowSignalRequest,
@@ -404,6 +405,98 @@ export class WorkflowService {
     return { step: completed, duplicate: false };
   }
 
+  async completeApproval(
+    authContext: AuthContext,
+    input: TenantProjectScope & {
+      readonly workflowId: string;
+      readonly runId: string;
+      readonly stepId: string;
+      readonly request: CompleteWorkflowApprovalRequest;
+    },
+  ): Promise<{ readonly step: WorkflowStepRecord; readonly duplicate: boolean } | null> {
+    assertProjectPermission(authContext, input, 'workflows:start');
+
+    const run = await this.repository.findRun({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      workflowId: input.workflowId,
+      runId: input.runId,
+    });
+
+    if (run === null) {
+      return null;
+    }
+
+    const steps = await this.repository.listRunSteps({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      runId: run.id,
+    });
+    const step = steps.find((candidate) => candidate.stepId === input.stepId);
+
+    if (step === undefined || step.type !== 'approval') {
+      return null;
+    }
+
+    if (step.state === 'completed') {
+      return { step, duplicate: true };
+    }
+
+    if (step.state !== 'waiting_for_approval') {
+      return null;
+    }
+
+    const timestamp = this.now().toISOString();
+    const completed = await this.repository.updateStep({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      runId: run.id,
+      stepId: step.stepId,
+      expectedState: 'waiting_for_approval',
+      state: transitionWorkflowStepState(step.state, 'completed'),
+      metadata: {
+        ...step.metadata,
+        approvalDecision: input.request.decision,
+        approvalPayload: cloneJsonObject(input.request.payload ?? {}),
+        approvalCompletedAt: timestamp,
+        approvalActor: authContext.principal,
+      },
+      updatedAt: timestamp,
+    });
+
+    if (completed === null) {
+      const refreshedSteps = await this.repository.listRunSteps({
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        runId: run.id,
+      });
+      const refreshedStep = refreshedSteps.find((candidate) => candidate.stepId === input.stepId);
+
+      return refreshedStep?.state === 'completed' ? { step: refreshedStep, duplicate: true } : null;
+    }
+
+    await this.auditSink.record({
+      id: this.generateId(),
+      tenantId: completed.tenantId,
+      projectId: completed.projectId,
+      actor: authContext.principal,
+      action: 'workflow.approval.completed',
+      resourceType: 'workflow_step',
+      resourceId: completed.stepId,
+      metadata: {
+        workflowId: completed.workflowId,
+        workflowVersionId: completed.workflowVersionId,
+        runId: completed.runId,
+        decision: input.request.decision,
+      },
+      occurredAt: new Date(timestamp),
+    });
+
+    await this.activateNewlyReadyJobSteps(run);
+
+    return { step: completed, duplicate: false };
+  }
+
   async wakeDueTimers(
     authContext: AuthContext,
     input: TenantProjectScope,
@@ -726,13 +819,13 @@ export class WorkflowService {
           }
         }
 
-        if (step.type === 'wait_signal') {
+        if (step.type === 'wait_signal' || step.type === 'approval') {
           const waiting = await this.repository.updateStep({
             tenantId: run.tenantId,
             projectId: run.projectId,
             runId: run.id,
             stepId: step.stepId,
-            state: transitionWorkflowStepState(step.state, 'waiting_for_signal'),
+            state: transitionWorkflowStepState(step.state, step.type === 'approval' ? 'waiting_for_approval' : 'waiting_for_signal'),
             updatedAt: this.now().toISOString(),
           });
 
@@ -1409,6 +1502,7 @@ function isTerminalWorkflowRunState(state: WorkflowRunRecord['state']): boolean 
 
 function getReadyStepState(type: WorkflowStepType): WorkflowStepRecord['state'] {
   if (type === 'wait_signal') return 'waiting_for_signal';
+  if (type === 'approval') return 'waiting_for_approval';
   if (type === 'timer') return 'waiting_for_timer';
   return 'running';
 }
