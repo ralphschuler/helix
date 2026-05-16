@@ -2,9 +2,59 @@ import { JSDOM } from 'jsdom';
 import type { Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { hydrateAdminShell } from './entry-client.js';
+import { hydrateAdminShell, hydrateCustomerShell } from './entry-client.js';
 import { mockBrowserSessionHeader } from './features/auth/browser-auth.js';
 import { createApp } from './server/app.js';
+
+describe('customer client hydration', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('hydrates the SSR customer workspace without a React mismatch warning', async () => {
+    const response = await createApp().request('/', {
+      headers: {
+        [mockBrowserSessionHeader]: 'dev-session',
+      },
+    });
+    const html = await response.text();
+    const dom = new JSDOM(html, {
+      runScripts: 'dangerously',
+      url: 'http://localhost/',
+    });
+    const hydrationErrors: unknown[][] = [];
+    const originalError = globalThis.console.error;
+    let root: Root | undefined;
+
+    vi.stubGlobal('window', dom.window);
+    vi.stubGlobal('document', dom.window.document);
+    vi.stubGlobal('HTMLElement', dom.window.HTMLElement);
+    vi.stubGlobal('Node', dom.window.Node);
+    vi.stubGlobal('Text', dom.window.Text);
+    vi.stubGlobal('navigator', dom.window.navigator);
+    vi.stubGlobal('self', dom.window);
+    globalThis.console.error = (...args: unknown[]) => {
+      hydrationErrors.push(args);
+    };
+
+    try {
+      root = await hydrateCustomerShell();
+      await waitForClientWork(dom);
+
+      expect(hydrationErrors.filter(isHydrationMismatch)).toEqual([]);
+      expect(
+        dom.window.document.querySelector('[data-testid="customer-shell"]')
+          ?.textContent,
+      ).toContain('Customer workspace ready');
+    } finally {
+      root?.unmount();
+      await waitForClientWork(dom);
+      globalThis.console.error = originalError;
+      dom.window.close();
+    }
+  });
+});
 
 describe('admin client hydration', () => {
   afterEach(() => {

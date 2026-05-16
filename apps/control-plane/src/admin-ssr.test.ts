@@ -1,7 +1,7 @@
 import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
 
-import { mockBrowserSessionHeader } from './features/auth/browser-auth.js';
+import { createMockBrowserAuthProvider, defaultMockAuthContext, mockBrowserSessionHeader } from './features/auth/browser-auth.js';
 import { createApp } from './server/app.js';
 
 const requiredAdminSections = [
@@ -25,6 +25,61 @@ const dangerousControlLabels = [
   'Steer processor assignment',
   'Override tenant quota',
 ] as const;
+
+describe('customer workspace SSR route', () => {
+  it('streams the authenticated customer workspace at the root route', async () => {
+    const response = await createApp({
+      browserAuthProvider: createMockBrowserAuthProvider({
+        sessions: {
+          customer: {
+            ...defaultMockAuthContext,
+            sessionId: 'customer',
+            permissions: ['jobs:read', 'workflows:read'],
+          },
+        },
+      }),
+    }).request('/', {
+      headers: {
+        [mockBrowserSessionHeader]: 'customer',
+      },
+    });
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(html).toContain('Helix Control Plane');
+    expect(html).toContain('Customer workspace ready');
+    expect(html).toContain('Jobs');
+    expect(html).toContain('Workflows');
+    expect(html).toContain('Admin/operator controls remain behind /admin.');
+    expect(html).not.toContain('Replay/DLQ');
+  });
+
+  it('keeps non-admin customer users out of the admin interface', async () => {
+    const app = createApp({
+      browserAuthProvider: createMockBrowserAuthProvider({
+        sessions: {
+          customer: {
+            ...defaultMockAuthContext,
+            sessionId: 'customer',
+            permissions: ['jobs:read', 'workflows:read'],
+          },
+        },
+      }),
+    });
+
+    const rootResponse = await app.request('/', {
+      headers: { [mockBrowserSessionHeader]: 'customer' },
+    });
+    const adminResponse = await app.request('/admin', {
+      headers: { [mockBrowserSessionHeader]: 'customer' },
+    });
+
+    expect(rootResponse.status).toBe(200);
+    expect(adminResponse.status).toBe(403);
+    await expect(adminResponse.json()).resolves.toMatchObject({ error: 'missing_admin_read_permission' });
+  });
+});
 
 describe('admin SSR route', () => {
   it('streams an admin HTML shell with dehydrated route data', async () => {
