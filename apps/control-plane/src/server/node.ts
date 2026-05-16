@@ -50,20 +50,68 @@ function createDefaultAppOptions(): CreateAppOptions {
 
   const processorRepository = new KyselyProcessorRegistryRepository(db);
 
+  const runtimeServices: { jobService?: JobService } = {};
+  const workflowService = new WorkflowService({
+    jobActivator: async ({ idempotencyKey, request, scope }) => {
+      if (runtimeServices.jobService === undefined) {
+        throw new Error('Job service is not configured.');
+      }
+
+      return runtimeServices.jobService.createJob(
+        {
+          tenantId: scope.tenantId,
+          projectId: scope.projectId,
+          principal: { type: 'service', id: 'workflow-runtime' },
+          permissions: ['jobs:create'],
+        },
+        { ...scope, idempotencyKey, request },
+      );
+    },
+    repository: new KyselyWorkflowRepository(db),
+  });
+  const jobService = new JobService({
+    onJobCompleted: async (job) => {
+      const workflowId = typeof job.metadata.workflowId === 'string' ? job.metadata.workflowId : null;
+      const workflowRunId = typeof job.metadata.workflowRunId === 'string' ? job.metadata.workflowRunId : null;
+      const workflowStepId = typeof job.metadata.workflowStepId === 'string' ? job.metadata.workflowStepId : null;
+
+      if (workflowId === null || workflowRunId === null || workflowStepId === null) {
+        return;
+      }
+
+      await workflowService.completeStep(
+        {
+          tenantId: job.tenantId,
+          projectId: job.projectId,
+          principal: { type: 'service', id: 'workflow-runtime' },
+          permissions: ['workflows:start'],
+        },
+        {
+          tenantId: job.tenantId,
+          projectId: job.projectId,
+          workflowId,
+          runId: workflowRunId,
+          stepId: workflowStepId,
+          completedJobId: job.id,
+        },
+      );
+    },
+    processorRepository,
+    repository: new KyselyJobRepository(db),
+  });
+  runtimeServices.jobService = jobService;
+
   return {
     apiAuthProvider: createApiAuthProvider({
       projectApiKeyAuthenticator: projectApiKeyService,
       agentTokenAuthenticator: agentAuthService,
     }),
-    jobService: new JobService({
-      repository: new KyselyJobRepository(db),
-      processorRepository,
-    }),
+    jobService,
     processorRegistryService: new ProcessorRegistryService({
       auditSink,
       repository: processorRepository,
     }),
-    workflowService: new WorkflowService({ repository: new KyselyWorkflowRepository(db) }),
+    workflowService,
   };
 }
 

@@ -1,12 +1,15 @@
 import type { Kysely, Selectable } from 'kysely';
 import type {
   AuthContext,
+  CreateJobRequest,
   CreateWorkflowRequest,
   StartWorkflowRunRequest,
   TenantProjectScope,
   UpdateWorkflowDraftRequest,
   WorkflowDefinitionRecord,
   WorkflowRunRecord,
+  WorkflowStepRecord,
+  WorkflowStepType,
   WorkflowVersionRecord,
 } from '@helix/contracts';
 
@@ -18,6 +21,7 @@ import type {
   RuntimeOutboxRecord,
 } from '../runtime/transactional-outbox.js';
 import { assertValidWorkflowDag } from './workflow-dag-validator.js';
+import { transitionWorkflowStepState } from './workflow-step-state-machine.js';
 
 export { WorkflowGraphValidationError } from './workflow-dag-validator.js';
 
@@ -37,8 +41,19 @@ export interface WorkflowRepositoryPublishInput {
   readonly version: WorkflowVersionRecord;
 }
 
+export interface WorkflowStepDependencyRecord extends TenantProjectScope {
+  readonly workflowId: string;
+  readonly workflowVersionId: string;
+  readonly runId: string;
+  readonly fromStepId: string;
+  readonly toStepId: string;
+  readonly createdAt: string;
+}
+
 export interface WorkflowRepositoryStartRunInput {
   readonly run: WorkflowRunRecord;
+  readonly steps: readonly WorkflowStepRecord[];
+  readonly dependencies: readonly WorkflowStepDependencyRecord[];
   readonly events: readonly RuntimeEventRecord[];
   readonly outbox: readonly RuntimeOutboxRecord[];
 }
@@ -55,11 +70,34 @@ export interface WorkflowRepository {
   findRun(input: TenantProjectScope & { readonly workflowId: string; readonly runId: string }): Promise<WorkflowRunRecord | null>;
   listRuns(input: TenantProjectScope & { readonly workflowId: string }): Promise<WorkflowRunRecord[]>;
   findRunByIdempotencyKey(input: TenantProjectScope & { readonly workflowId: string; readonly idempotencyKey: string }): Promise<WorkflowRunRecord | null>;
+  listRunSteps(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowStepRecord[]>;
+  listRunStepDependencies(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowStepDependencyRecord[]>;
+  updateStep(input: TenantProjectScope & {
+    readonly runId: string;
+    readonly stepId: string;
+    readonly state?: WorkflowStepRecord['state'];
+    readonly jobId?: string | null;
+    readonly updatedAt: string;
+  }): Promise<WorkflowStepRecord | null>;
   createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord>;
 }
 
+export interface WorkflowJobActivationInput {
+  readonly scope: TenantProjectScope;
+  readonly idempotencyKey: string;
+  readonly request: CreateJobRequest;
+}
+
+export interface WorkflowJobActivationResult {
+  readonly job: { readonly id: string };
+  readonly created: boolean;
+}
+
+export type WorkflowJobActivator = (input: WorkflowJobActivationInput) => Promise<WorkflowJobActivationResult>;
+
 export interface WorkflowServiceOptions {
   readonly repository: WorkflowRepository;
+  readonly jobActivator?: WorkflowJobActivator;
   readonly now?: () => Date;
   readonly generateId?: () => string;
 }
@@ -85,13 +123,44 @@ export class WorkflowRunIdempotencyConflictError extends Error {
   }
 }
 
+export class WorkflowStepNotFoundError extends Error {
+  constructor() {
+    super('Workflow step not found.');
+    this.name = 'WorkflowStepNotFoundError';
+  }
+}
+
+export class WorkflowStepJobMismatchError extends Error {
+  constructor() {
+    super('Workflow step is not bound to the completed job.');
+    this.name = 'WorkflowStepJobMismatchError';
+  }
+}
+
+interface ParsedWorkflowNode {
+  readonly id: string;
+  readonly type: WorkflowStepType;
+}
+
+interface ParsedWorkflowEdge {
+  readonly from: string;
+  readonly to: string;
+}
+
+interface ParsedWorkflowGraph {
+  readonly nodes: readonly ParsedWorkflowNode[];
+  readonly edges: readonly ParsedWorkflowEdge[];
+}
+
 export class WorkflowService {
   private readonly repository: WorkflowRepository;
+  private readonly jobActivator: WorkflowJobActivator | undefined;
   private readonly now: () => Date;
   private readonly generateId: () => string;
 
   constructor(options: WorkflowServiceOptions) {
     this.repository = options.repository;
+    this.jobActivator = options.jobActivator;
     this.now = options.now ?? (() => new Date());
     this.generateId = options.generateId ?? (() => randomUuidV7LikeId(this.now()));
   }
@@ -197,6 +266,58 @@ export class WorkflowService {
     return this.repository.listRuns(input);
   }
 
+  async completeStep(
+    authContext: AuthContext,
+    input: TenantProjectScope & {
+      readonly workflowId: string;
+      readonly runId: string;
+      readonly stepId: string;
+      readonly completedJobId?: string;
+    },
+  ): Promise<WorkflowStepRecord> {
+    assertProjectPermission(authContext, input, 'workflows:start');
+
+    const run = await this.repository.findRun({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      workflowId: input.workflowId,
+      runId: input.runId,
+    });
+
+    if (run === null) {
+      throw new WorkflowStepNotFoundError();
+    }
+
+    const steps = await this.repository.listRunSteps(input);
+    const step = steps.find((candidate) => candidate.stepId === input.stepId);
+
+    if (step === undefined) {
+      throw new WorkflowStepNotFoundError();
+    }
+
+    if (input.completedJobId !== undefined && step.jobId !== input.completedJobId) {
+      throw new WorkflowStepJobMismatchError();
+    }
+
+    const nextState = transitionWorkflowStepState(step.state, 'completed');
+    const completed = await this.repository.updateStep({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      runId: input.runId,
+      stepId: input.stepId,
+      state: nextState,
+      updatedAt: this.now().toISOString(),
+    });
+
+    if (completed === null) {
+      throw new WorkflowStepNotFoundError();
+    }
+
+    await this.activateNewlyReadyJobSteps(run);
+
+    return completed;
+  }
+
   async startRun(
     authContext: AuthContext,
     input: TenantProjectScope & {
@@ -234,6 +355,7 @@ export class WorkflowService {
         throw new WorkflowRunIdempotencyConflictError();
       }
 
+      await this.activateInitialReadyJobSteps(existing);
       return { run: existing, created: false };
     }
 
@@ -250,11 +372,40 @@ export class WorkflowService {
       updatedAt: timestamp,
     };
 
+    const workflowGraph = parseWorkflowGraph(version.graph);
+    const readyStepIds = findInitialReadyJobStepIds(workflowGraph);
+    const steps = workflowGraph.nodes.map((node): WorkflowStepRecord => ({
+      id: randomUuidV7LikeId(new Date(timestamp)),
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      workflowId: workflow.id,
+      workflowVersionId: version.id,
+      runId: run.id,
+      stepId: node.id,
+      type: node.type,
+      state: readyStepIds.has(node.id) ? 'running' : 'pending',
+      jobId: null,
+      metadata: {},
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }));
+    const dependencies = workflowGraph.edges.map((edge): WorkflowStepDependencyRecord => ({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      workflowId: workflow.id,
+      workflowVersionId: version.id,
+      runId: run.id,
+      fromStepId: edge.from,
+      toStepId: edge.to,
+      createdAt: timestamp,
+    }));
     const events = [this.createRunStartedEvent(run, timestamp)];
     const outbox = events.map((event) => this.createRuntimeOutbox(event, new Date(timestamp)));
 
     try {
-      return { run: await this.repository.createRun({ run, events, outbox }), created: true };
+      const createdRun = await this.repository.createRun({ run, steps, dependencies, events, outbox });
+      await this.activateInitialReadyJobSteps(createdRun);
+      return { run: createdRun, created: true };
     } catch (error) {
       const existingAfterRace = await this.repository.findRunByIdempotencyKey(input);
 
@@ -263,11 +414,85 @@ export class WorkflowService {
           throw new WorkflowRunIdempotencyConflictError();
         }
 
+        await this.activateInitialReadyJobSteps(existingAfterRace);
         return { run: existingAfterRace, created: false };
       }
 
       throw error;
     }
+  }
+
+  private async activateInitialReadyJobSteps(run: WorkflowRunRecord): Promise<void> {
+    const steps = await this.repository.listRunSteps({
+      tenantId: run.tenantId,
+      projectId: run.projectId,
+      runId: run.id,
+    });
+
+    for (const step of steps.filter((candidate) => candidate.type === 'job' && candidate.state === 'running')) {
+      await this.activateJobStep(run, step);
+    }
+  }
+
+  private async activateNewlyReadyJobSteps(run: WorkflowRunRecord): Promise<void> {
+    const scope = { tenantId: run.tenantId, projectId: run.projectId, runId: run.id };
+    const [steps, dependencies] = await Promise.all([
+      this.repository.listRunSteps(scope),
+      this.repository.listRunStepDependencies(scope),
+    ]);
+    const completedStepIds = new Set(steps
+      .filter((step) => step.state === 'completed')
+      .map((step) => step.stepId));
+
+    for (const step of steps.filter((candidate) => candidate.type === 'job' && candidate.state === 'pending')) {
+      const incoming = dependencies.filter((dependency) => dependency.toStepId === step.stepId);
+      const isReady = incoming.length > 0 && incoming.every((dependency) => completedStepIds.has(dependency.fromStepId));
+
+      if (!isReady) {
+        continue;
+      }
+
+      const running = await this.repository.updateStep({
+        tenantId: run.tenantId,
+        projectId: run.projectId,
+        runId: run.id,
+        stepId: step.stepId,
+        state: transitionWorkflowStepState(step.state, 'running'),
+        updatedAt: this.now().toISOString(),
+      });
+
+      if (running !== null) {
+        await this.activateJobStep(run, running);
+      }
+    }
+  }
+
+  private async activateJobStep(run: WorkflowRunRecord, step: WorkflowStepRecord): Promise<void> {
+    if (this.jobActivator === undefined || step.jobId !== null) {
+      return;
+    }
+
+    const result = await this.jobActivator({
+      scope: { tenantId: run.tenantId, projectId: run.projectId },
+      idempotencyKey: `workflow-step:${run.id}:${step.stepId}`,
+      request: {
+        metadata: {
+          workflowId: run.workflowId,
+          workflowVersionId: run.workflowVersionId,
+          workflowRunId: run.id,
+          workflowStepId: step.stepId,
+        },
+      },
+    });
+
+    await this.repository.updateStep({
+      tenantId: run.tenantId,
+      projectId: run.projectId,
+      runId: run.id,
+      stepId: step.stepId,
+      jobId: result.job.id,
+      updatedAt: this.now().toISOString(),
+    });
   }
 
   private createRunStartedEvent(run: WorkflowRunRecord, timestamp: string): RuntimeEventRecord {
@@ -321,6 +546,8 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
   readonly workflows: WorkflowDefinitionRecord[] = [];
   readonly versions: WorkflowVersionRecord[] = [];
   readonly runs: WorkflowRunRecord[] = [];
+  readonly steps: WorkflowStepRecord[] = [];
+  readonly stepDependencies: WorkflowStepDependencyRecord[] = [];
   readonly runtimeEvents: RuntimeEventRecord[] = [];
   readonly runtimeOutbox: RuntimeOutboxRecord[] = [];
 
@@ -436,8 +663,67 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
     return run === undefined ? null : cloneRun(run);
   }
 
+  async listRunSteps(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowStepRecord[]> {
+    return this.steps
+      .filter(
+        (step) =>
+          step.tenantId === input.tenantId &&
+          step.projectId === input.projectId &&
+          step.runId === input.runId,
+      )
+      .map(cloneStep);
+  }
+
+  async listRunStepDependencies(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowStepDependencyRecord[]> {
+    return this.stepDependencies
+      .filter(
+        (dependency) =>
+          dependency.tenantId === input.tenantId &&
+          dependency.projectId === input.projectId &&
+          dependency.runId === input.runId,
+      )
+      .map(cloneStepDependency);
+  }
+
+  async updateStep(input: TenantProjectScope & {
+    readonly runId: string;
+    readonly stepId: string;
+    readonly state?: WorkflowStepRecord['state'];
+    readonly jobId?: string | null;
+    readonly updatedAt: string;
+  }): Promise<WorkflowStepRecord | null> {
+    const index = this.steps.findIndex(
+      (step) =>
+        step.tenantId === input.tenantId &&
+        step.projectId === input.projectId &&
+        step.runId === input.runId &&
+        step.stepId === input.stepId,
+    );
+
+    if (index === -1) {
+      return null;
+    }
+
+    const current = this.steps[index];
+    if (current === undefined) {
+      return null;
+    }
+
+    const updated: WorkflowStepRecord = {
+      ...current,
+      state: input.state ?? current.state,
+      jobId: input.jobId === undefined ? current.jobId : input.jobId,
+      updatedAt: input.updatedAt,
+    };
+    this.steps[index] = cloneStep(updated);
+
+    return cloneStep(updated);
+  }
+
   async createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord> {
     this.runs.push(cloneRun(input.run));
+    this.steps.push(...input.steps.map(cloneStep));
+    this.stepDependencies.push(...input.dependencies.map(cloneStepDependency));
     this.runtimeEvents.push(...input.events.map(cloneRuntimeEvent));
     this.runtimeOutbox.push(...input.outbox.map(cloneRuntimeOutbox));
     return cloneRun(input.run);
@@ -570,6 +856,56 @@ export class KyselyWorkflowRepository implements WorkflowRepository {
     return row === undefined ? null : toWorkflowRunRecord(row);
   }
 
+  async listRunSteps(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowStepRecord[]> {
+    const rows = await this.db
+      .selectFrom('workflow_steps')
+      .selectAll()
+      .where('tenant_id', '=', input.tenantId)
+      .where('project_id', '=', input.projectId)
+      .where('run_id', '=', input.runId)
+      .orderBy('created_at', 'asc')
+      .execute();
+
+    return rows.map(toWorkflowStepRecord);
+  }
+
+  async listRunStepDependencies(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowStepDependencyRecord[]> {
+    const rows = await this.db
+      .selectFrom('workflow_step_dependencies')
+      .selectAll()
+      .where('tenant_id', '=', input.tenantId)
+      .where('project_id', '=', input.projectId)
+      .where('run_id', '=', input.runId)
+      .orderBy('created_at', 'asc')
+      .execute();
+
+    return rows.map(toWorkflowStepDependencyRecord);
+  }
+
+  async updateStep(input: TenantProjectScope & {
+    readonly runId: string;
+    readonly stepId: string;
+    readonly state?: WorkflowStepRecord['state'];
+    readonly jobId?: string | null;
+    readonly updatedAt: string;
+  }): Promise<WorkflowStepRecord | null> {
+    const update: Record<string, unknown> = { updated_at: input.updatedAt };
+    if (input.state !== undefined) update.state = input.state;
+    if (input.jobId !== undefined) update.job_id = input.jobId;
+
+    const row = await this.db
+      .updateTable('workflow_steps')
+      .set(update)
+      .where('tenant_id', '=', input.tenantId)
+      .where('project_id', '=', input.projectId)
+      .where('run_id', '=', input.runId)
+      .where('step_id', '=', input.stepId)
+      .returningAll()
+      .executeTakeFirst();
+
+    return row === undefined ? null : toWorkflowStepRecord(row);
+  }
+
   async createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord> {
     return this.db.transaction().execute(async (transaction) => {
       const row = await transaction
@@ -577,6 +913,17 @@ export class KyselyWorkflowRepository implements WorkflowRepository {
         .values(toWorkflowRunRow(input.run))
         .returningAll()
         .executeTakeFirstOrThrow();
+
+      if (input.steps.length > 0) {
+        await transaction.insertInto('workflow_steps').values(input.steps.map(toWorkflowStepRow)).execute();
+      }
+
+      if (input.dependencies.length > 0) {
+        await transaction
+          .insertInto('workflow_step_dependencies')
+          .values(input.dependencies.map(toWorkflowStepDependencyRow))
+          .execute();
+      }
 
       for (const event of input.events) {
         await transaction.insertInto('runtime_events').values(toRuntimeEventRow(event)).execute();
@@ -589,6 +936,52 @@ export class KyselyWorkflowRepository implements WorkflowRepository {
       return toWorkflowRunRecord(row);
     });
   }
+}
+
+function parseWorkflowGraph(graph: Record<string, unknown>): ParsedWorkflowGraph {
+  const rawNodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const rawEdges = Array.isArray(graph.edges) ? graph.edges : [];
+  const nodes = rawNodes.flatMap((node): ParsedWorkflowNode[] => {
+    if (node === null || typeof node !== 'object' || Array.isArray(node)) {
+      return [];
+    }
+
+    const record = node as Record<string, unknown>;
+    const stepId = typeof record.id === 'string' ? record.id : null;
+    const type = typeof record.type === 'string' ? record.type : 'job';
+
+    if (stepId === null || !isWorkflowStepType(type)) {
+      return [];
+    }
+
+    return [{ id: stepId, type }];
+  });
+  const edges = rawEdges.flatMap((edge): ParsedWorkflowEdge[] => {
+    if (edge === null || typeof edge !== 'object' || Array.isArray(edge)) {
+      return [];
+    }
+
+    const record = edge as Record<string, unknown>;
+
+    return typeof record.from === 'string' && typeof record.to === 'string'
+      ? [{ from: record.from, to: record.to }]
+      : [];
+  });
+
+  return { nodes, edges };
+}
+
+function isWorkflowStepType(value: string): value is WorkflowStepType {
+  return ['job', 'wait_signal', 'approval', 'timer', 'pause', 'join', 'completion'].includes(value);
+}
+
+function findInitialReadyJobStepIds(graph: ParsedWorkflowGraph): ReadonlySet<string> {
+  const blockedStepIds = new Set(graph.edges.map((edge) => edge.to));
+  return new Set(
+    graph.nodes
+      .filter((node) => node.type === 'job' && !blockedStepIds.has(node.id))
+      .map((node) => node.id),
+  );
 }
 
 function cloneJsonObject(value: Record<string, unknown>): Record<string, unknown> {
@@ -605,6 +998,14 @@ function cloneVersion(version: WorkflowVersionRecord): WorkflowVersionRecord {
 
 function cloneRun(run: WorkflowRunRecord): WorkflowRunRecord {
   return { ...run };
+}
+
+function cloneStep(step: WorkflowStepRecord): WorkflowStepRecord {
+  return { ...step, metadata: cloneJsonObject(step.metadata) };
+}
+
+function cloneStepDependency(dependency: WorkflowStepDependencyRecord): WorkflowStepDependencyRecord {
+  return { ...dependency };
 }
 
 function cloneRuntimeEvent(event: RuntimeEventRecord): RuntimeEventRecord {
@@ -662,6 +1063,39 @@ function toWorkflowRunRecord(row: Selectable<HelixDatabase['workflow_runs']>): W
   };
 }
 
+function toWorkflowStepRecord(row: Selectable<HelixDatabase['workflow_steps']>): WorkflowStepRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    workflowId: row.workflow_id,
+    workflowVersionId: row.workflow_version_id,
+    runId: row.run_id,
+    stepId: row.step_id,
+    type: row.type,
+    state: row.state,
+    jobId: row.job_id,
+    metadata: row.metadata_json,
+    createdAt: toIsoString(row.created_at),
+    updatedAt: toIsoString(row.updated_at),
+  };
+}
+
+function toWorkflowStepDependencyRecord(
+  row: Selectable<HelixDatabase['workflow_step_dependencies']>,
+): WorkflowStepDependencyRecord {
+  return {
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    workflowId: row.workflow_id,
+    workflowVersionId: row.workflow_version_id,
+    runId: row.run_id,
+    fromStepId: row.from_step_id,
+    toStepId: row.to_step_id,
+    createdAt: toIsoString(row.created_at),
+  };
+}
+
 function toWorkflowDefinitionRow(workflow: WorkflowDefinitionRecord) {
   return {
     id: workflow.id,
@@ -702,6 +1136,37 @@ function toWorkflowRunRow(run: WorkflowRunRecord) {
     idempotency_key: run.idempotencyKey,
     created_at: run.createdAt,
     updated_at: run.updatedAt,
+  };
+}
+
+function toWorkflowStepRow(step: WorkflowStepRecord) {
+  return {
+    id: step.id,
+    tenant_id: step.tenantId,
+    project_id: step.projectId,
+    workflow_id: step.workflowId,
+    workflow_version_id: step.workflowVersionId,
+    run_id: step.runId,
+    step_id: step.stepId,
+    type: step.type,
+    state: step.state,
+    job_id: step.jobId,
+    metadata_json: step.metadata,
+    created_at: step.createdAt,
+    updated_at: step.updatedAt,
+  };
+}
+
+function toWorkflowStepDependencyRow(dependency: WorkflowStepDependencyRecord) {
+  return {
+    tenant_id: dependency.tenantId,
+    project_id: dependency.projectId,
+    workflow_id: dependency.workflowId,
+    workflow_version_id: dependency.workflowVersionId,
+    run_id: dependency.runId,
+    from_step_id: dependency.fromStepId,
+    to_step_id: dependency.toStepId,
+    created_at: dependency.createdAt,
   };
 }
 
