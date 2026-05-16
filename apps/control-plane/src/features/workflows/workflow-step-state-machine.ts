@@ -1,8 +1,9 @@
 import type { WorkflowStepState } from '@helix/contracts';
 
 const allowedTransitions = new Map<WorkflowStepState, ReadonlySet<WorkflowStepState>>([
-  ['pending', new Set(['pending', 'running', 'canceled'])],
+  ['pending', new Set(['pending', 'running', 'waiting_for_signal', 'canceled'])],
   ['running', new Set(['running', 'completed', 'failed', 'canceled'])],
+  ['waiting_for_signal', new Set(['waiting_for_signal', 'completed', 'failed', 'canceled'])],
   ['completed', new Set(['completed'])],
   ['failed', new Set(['failed'])],
   ['canceled', new Set(['canceled'])],

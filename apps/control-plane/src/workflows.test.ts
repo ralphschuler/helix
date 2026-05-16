@@ -5,6 +5,7 @@ import {
   workflowRunListResponseSchema,
   workflowRunResponseSchema,
   workflowRunStartedEventPayloadSchema,
+  workflowSignalResponseSchema,
   workflowVersionResponseSchema,
 } from '@helix/contracts';
 
@@ -270,6 +271,131 @@ describe('workflow API', () => {
     expect(jobRepository.jobs.map((job) => job.idempotencyKey)).toEqual([
       `workflow-step:${first?.run.id}:extract`,
       `workflow-step:${first?.run.id}:transform`,
+    ]);
+  });
+
+  it('puts ready wait_signal steps into waiting_for_signal and resumes them once through the public signal API', async () => {
+    const workflowRepository = new InMemoryWorkflowRepository();
+    const jobRepository = new InMemoryJobRepository();
+    const jobService = new JobService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d11',
+      ]),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: jobRepository,
+    });
+    const service = new WorkflowService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d11',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d12',
+      ]),
+      jobActivator: async ({ idempotencyKey, request, scope }) => jobService.createJob(
+        { ...workflowAuth, permissions: [...workflowAuth.permissions, 'jobs:create'] },
+        { ...scope, idempotencyKey, request },
+      ),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: workflowRepository,
+    });
+    const app = createApp({ apiAuthProvider: createFixedApiAuthProvider(workflowAuth), workflowService: service });
+    const workflow = await service.createWorkflow(workflowAuth, {
+      tenantId,
+      projectId,
+      request: {
+        slug: 'signal-resume',
+        name: 'Signal Resume',
+        draftGraph: {
+          nodes: [
+            { id: 'collect', type: 'job' },
+            { id: 'approval', type: 'wait_signal' },
+            { id: 'ship', type: 'job' },
+          ],
+          edges: [
+            { from: 'collect', to: 'approval' },
+            { from: 'approval', to: 'ship' },
+          ],
+        },
+      },
+    });
+    await service.publishWorkflow(workflowAuth, { tenantId, projectId, workflowId: workflow.id });
+    const started = await service.startRun(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      idempotencyKey: 'workflow-run:signal-1',
+      request: {},
+    });
+    const runId = started?.run.id ?? '';
+
+    const earlySignalResponse = await app.request(`/api/v1/signals/${workflow.id}`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ runId, stepId: 'approval', payload: { decision: 'too-early' } }),
+    });
+
+    expect(earlySignalResponse.status).toBe(404);
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'approval', type: 'wait_signal', state: 'pending', jobId: null }),
+      expect.objectContaining({ stepId: 'ship', type: 'job', state: 'pending', jobId: null }),
+    ]));
+
+    await service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId,
+      stepId: 'collect',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+    });
+
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'approval', type: 'wait_signal', state: 'waiting_for_signal', jobId: null }),
+      expect.objectContaining({ stepId: 'ship', type: 'job', state: 'pending', jobId: null }),
+    ]));
+
+    const signalResponse = await app.request(`/api/v1/signals/${workflow.id}`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ runId, stepId: 'approval', payload: { decision: 'approved' } }),
+    });
+    const duplicateSignalResponse = await app.request(`/api/v1/signals/${workflow.id}`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ runId, stepId: 'approval', payload: { decision: 'approved' } }),
+    });
+    const wrongTenantApp = createApp({
+      apiAuthProvider: createFixedApiAuthProvider({
+        ...workflowAuth,
+        tenantId: '01890f42-98c4-7cc3-8a5e-0c567f1d3a79',
+        projectId: '01890f42-98c4-7cc3-9a5e-0c567f1d3a80',
+      }),
+      workflowService: service,
+    });
+    const wrongTenantResponse = await wrongTenantApp.request(`/api/v1/signals/${workflow.id}`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ runId, stepId: 'approval' }),
+    });
+
+    expect(signalResponse.status).toBe(202);
+    expect(workflowSignalResponseSchema.parse(await signalResponse.json())).toMatchObject({
+      duplicate: false,
+      step: { stepId: 'approval', state: 'completed', metadata: { signalPayload: { decision: 'approved' } } },
+    });
+    expect(duplicateSignalResponse.status).toBe(200);
+    expect(workflowSignalResponseSchema.parse(await duplicateSignalResponse.json())).toMatchObject({
+      duplicate: true,
+      step: { stepId: 'approval', state: 'completed', metadata: { signalPayload: { decision: 'approved' } } },
+    });
+    expect(wrongTenantResponse.status).toBe(404);
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'approval', state: 'completed', jobId: null }),
+      expect.objectContaining({ stepId: 'ship', state: 'running', jobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d11' }),
+    ]));
+    expect(jobRepository.jobs.map((job) => job.idempotencyKey)).toEqual([
+      `workflow-step:${runId}:collect`,
+      `workflow-step:${runId}:ship`,
     ]);
   });
 

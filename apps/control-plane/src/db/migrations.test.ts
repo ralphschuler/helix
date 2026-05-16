@@ -157,6 +157,21 @@ describe('database migration runner', () => {
     ).resolves.toBe(jobMigration?.sql);
   });
 
+  it('ships waiting signal workflow step state migration', async () => {
+    const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
+    const signalMigration = migrations.find(
+      (migration) => migration.id === '0011_workflow_waiting_signal_state',
+    );
+
+    expect(signalMigration).toBeDefined();
+    expect(signalMigration?.sql).toContain('workflow_steps_state_check');
+    expect(signalMigration?.sql).toContain('waiting_for_signal');
+
+    await expect(
+      readFile(path.join(getDefaultMigrationsDirectory(), '0011_workflow_waiting_signal_state.sql'), 'utf8'),
+    ).resolves.toBe(signalMigration?.sql);
+  });
+
   it('ships processor registry schema with scoped capabilities and routing explanations', async () => {
     const migrations = await loadMigrationFiles(getDefaultMigrationsDirectory());
     const processorMigration = migrations.find(

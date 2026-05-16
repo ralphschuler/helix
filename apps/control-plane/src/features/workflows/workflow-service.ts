@@ -3,6 +3,7 @@ import type {
   AuthContext,
   CreateJobRequest,
   CreateWorkflowRequest,
+  DeliverWorkflowSignalRequest,
   StartWorkflowRunRequest,
   TenantProjectScope,
   UpdateWorkflowDraftRequest,
@@ -76,7 +77,9 @@ export interface WorkflowRepository {
     readonly runId: string;
     readonly stepId: string;
     readonly state?: WorkflowStepRecord['state'];
+    readonly expectedState?: WorkflowStepRecord['state'];
     readonly jobId?: string | null;
+    readonly metadata?: Record<string, unknown>;
     readonly updatedAt: string;
   }): Promise<WorkflowStepRecord | null>;
   createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord>;
@@ -318,6 +321,77 @@ export class WorkflowService {
     return completed;
   }
 
+  async deliverSignal(
+    authContext: AuthContext,
+    input: TenantProjectScope & {
+      readonly workflowId: string;
+      readonly request: DeliverWorkflowSignalRequest;
+    },
+  ): Promise<{ readonly step: WorkflowStepRecord; readonly duplicate: boolean } | null> {
+    assertProjectPermission(authContext, input, 'workflows:start');
+
+    const run = await this.repository.findRun({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      workflowId: input.workflowId,
+      runId: input.request.runId,
+    });
+
+    if (run === null) {
+      return null;
+    }
+
+    const steps = await this.repository.listRunSteps({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      runId: run.id,
+    });
+    const step = steps.find((candidate) => candidate.stepId === input.request.stepId);
+
+    if (step === undefined || step.type !== 'wait_signal') {
+      return null;
+    }
+
+    if (step.state === 'completed') {
+      return { step, duplicate: true };
+    }
+
+    if (step.state !== 'waiting_for_signal') {
+      return null;
+    }
+
+    const timestamp = this.now().toISOString();
+    const completed = await this.repository.updateStep({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      runId: run.id,
+      stepId: step.stepId,
+      expectedState: 'waiting_for_signal',
+      state: transitionWorkflowStepState(step.state, 'completed'),
+      metadata: {
+        ...step.metadata,
+        signalPayload: cloneJsonObject(input.request.payload ?? {}),
+        signalDeliveredAt: timestamp,
+      },
+      updatedAt: timestamp,
+    });
+
+    if (completed === null) {
+      const refreshedSteps = await this.repository.listRunSteps({
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        runId: run.id,
+      });
+      const refreshedStep = refreshedSteps.find((candidate) => candidate.stepId === input.request.stepId);
+
+      return refreshedStep?.state === 'completed' ? { step: refreshedStep, duplicate: true } : null;
+    }
+
+    await this.activateNewlyReadyJobSteps(run);
+
+    return { step: completed, duplicate: false };
+  }
+
   async resumeRun(
     authContext: AuthContext,
     input: TenantProjectScope & { readonly workflowId: string; readonly runId: string },
@@ -330,7 +404,7 @@ export class WorkflowService {
       return null;
     }
 
-    await this.activateInitialReadyJobSteps(run);
+    await this.activateInitialReadySteps(run);
     await this.activateNewlyReadyJobSteps(run);
 
     return run;
@@ -373,7 +447,7 @@ export class WorkflowService {
         throw new WorkflowRunIdempotencyConflictError();
       }
 
-      await this.activateInitialReadyJobSteps(existing);
+      await this.activateInitialReadySteps(existing);
       return { run: existing, created: false };
     }
 
@@ -391,7 +465,7 @@ export class WorkflowService {
     };
 
     const workflowGraph = parseWorkflowGraph(version.graph);
-    const readyStepIds = findInitialReadyJobStepIds(workflowGraph);
+    const readyStepIds = findInitialReadyStepIds(workflowGraph);
     const steps = workflowGraph.nodes.map((node): WorkflowStepRecord => ({
       id: randomUuidV7LikeId(new Date(timestamp)),
       tenantId: input.tenantId,
@@ -401,7 +475,7 @@ export class WorkflowService {
       runId: run.id,
       stepId: node.id,
       type: node.type,
-      state: readyStepIds.has(node.id) ? 'running' : 'pending',
+      state: readyStepIds.has(node.id) ? getReadyStepState(node.type) : 'pending',
       jobId: null,
       metadata: {},
       createdAt: timestamp,
@@ -422,7 +496,7 @@ export class WorkflowService {
 
     try {
       const createdRun = await this.repository.createRun({ run, steps, dependencies, events, outbox });
-      await this.activateInitialReadyJobSteps(createdRun);
+      await this.activateInitialReadySteps(createdRun);
       return { run: createdRun, created: true };
     } catch (error) {
       const existingAfterRace = await this.repository.findRunByIdempotencyKey(input);
@@ -432,7 +506,7 @@ export class WorkflowService {
           throw new WorkflowRunIdempotencyConflictError();
         }
 
-        await this.activateInitialReadyJobSteps(existingAfterRace);
+        await this.activateInitialReadySteps(existingAfterRace);
         return { run: existingAfterRace, created: false };
       }
 
@@ -440,7 +514,7 @@ export class WorkflowService {
     }
   }
 
-  private async activateInitialReadyJobSteps(run: WorkflowRunRecord): Promise<void> {
+  private async activateInitialReadySteps(run: WorkflowRunRecord): Promise<void> {
     const steps = await this.repository.listRunSteps({
       tenantId: run.tenantId,
       projectId: run.projectId,
@@ -470,6 +544,22 @@ export class WorkflowService {
 
         if (!isReady) {
           continue;
+        }
+
+        if (step.type === 'wait_signal') {
+          const waiting = await this.repository.updateStep({
+            tenantId: run.tenantId,
+            projectId: run.projectId,
+            runId: run.id,
+            stepId: step.stepId,
+            state: transitionWorkflowStepState(step.state, 'waiting_for_signal'),
+            updatedAt: this.now().toISOString(),
+          });
+
+          if (waiting !== null) {
+            steps = await this.repository.listRunSteps(scope);
+            progressed = true;
+          }
         }
 
         if (step.type === 'job') {
@@ -741,7 +831,9 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
     readonly runId: string;
     readonly stepId: string;
     readonly state?: WorkflowStepRecord['state'];
+    readonly expectedState?: WorkflowStepRecord['state'];
     readonly jobId?: string | null;
+    readonly metadata?: Record<string, unknown>;
     readonly updatedAt: string;
   }): Promise<WorkflowStepRecord | null> {
     const index = this.steps.findIndex(
@@ -757,7 +849,7 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
     }
 
     const current = this.steps[index];
-    if (current === undefined) {
+    if (current === undefined || (input.expectedState !== undefined && current.state !== input.expectedState)) {
       return null;
     }
 
@@ -765,6 +857,7 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
       ...current,
       state: input.state ?? current.state,
       jobId: input.jobId === undefined ? current.jobId : input.jobId,
+      metadata: input.metadata === undefined ? current.metadata : cloneJsonObject(input.metadata),
       updatedAt: input.updatedAt,
     };
     this.steps[index] = cloneStep(updated);
@@ -938,20 +1031,29 @@ export class KyselyWorkflowRepository implements WorkflowRepository {
     readonly runId: string;
     readonly stepId: string;
     readonly state?: WorkflowStepRecord['state'];
+    readonly expectedState?: WorkflowStepRecord['state'];
     readonly jobId?: string | null;
+    readonly metadata?: Record<string, unknown>;
     readonly updatedAt: string;
   }): Promise<WorkflowStepRecord | null> {
     const update: Record<string, unknown> = { updated_at: input.updatedAt };
     if (input.state !== undefined) update.state = input.state;
     if (input.jobId !== undefined) update.job_id = input.jobId;
+    if (input.metadata !== undefined) update.metadata_json = input.metadata;
 
-    const row = await this.db
+    let query = this.db
       .updateTable('workflow_steps')
       .set(update)
       .where('tenant_id', '=', input.tenantId)
       .where('project_id', '=', input.projectId)
       .where('run_id', '=', input.runId)
-      .where('step_id', '=', input.stepId)
+      .where('step_id', '=', input.stepId);
+
+    if (input.expectedState !== undefined) {
+      query = query.where('state', '=', input.expectedState);
+    }
+
+    const row = await query
       .returningAll()
       .executeTakeFirst();
 
@@ -1027,13 +1129,17 @@ function isWorkflowStepType(value: string): value is WorkflowStepType {
   return ['job', 'wait_signal', 'approval', 'timer', 'pause', 'join', 'completion'].includes(value);
 }
 
-function findInitialReadyJobStepIds(graph: ParsedWorkflowGraph): ReadonlySet<string> {
+function findInitialReadyStepIds(graph: ParsedWorkflowGraph): ReadonlySet<string> {
   const blockedStepIds = new Set(graph.edges.map((edge) => edge.to));
   return new Set(
     graph.nodes
-      .filter((node) => node.type === 'job' && !blockedStepIds.has(node.id))
+      .filter((node) => (node.type === 'job' || node.type === 'wait_signal') && !blockedStepIds.has(node.id))
       .map((node) => node.id),
   );
+}
+
+function getReadyStepState(type: WorkflowStepType): WorkflowStepRecord['state'] {
+  return type === 'wait_signal' ? 'waiting_for_signal' : 'running';
 }
 
 function cloneJsonObject(value: Record<string, unknown>): Record<string, unknown> {
