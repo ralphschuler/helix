@@ -273,6 +273,123 @@ describe('workflow API', () => {
     ]);
   });
 
+  it('activates fan-out branches and advances a fan-in join only after all dependencies complete', async () => {
+    const workflowRepository = new InMemoryWorkflowRepository();
+    const jobRepository = new InMemoryJobRepository();
+    const jobService = new JobService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d11',
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d12',
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d13',
+      ]),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: jobRepository,
+    });
+    const service = new WorkflowService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d11',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d12',
+      ]),
+      jobActivator: async ({ idempotencyKey, request, scope }) => jobService.createJob(
+        { ...workflowAuth, permissions: [...workflowAuth.permissions, 'jobs:create'] },
+        { ...scope, idempotencyKey, request },
+      ),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: workflowRepository,
+    });
+    const workflow = await service.createWorkflow(workflowAuth, {
+      tenantId,
+      projectId,
+      request: {
+        slug: 'fan-out-fan-in-runtime',
+        name: 'Fan Out Fan In Runtime',
+        draftGraph: {
+          nodes: [
+            { id: 'start', type: 'job' },
+            { id: 'branch-a', type: 'job' },
+            { id: 'branch-b', type: 'job' },
+            { id: 'join', type: 'join' },
+            { id: 'done', type: 'job' },
+          ],
+          edges: [
+            { from: 'start', to: 'branch-a' },
+            { from: 'start', to: 'branch-b' },
+            { from: 'branch-a', to: 'join' },
+            { from: 'branch-b', to: 'join' },
+            { from: 'join', to: 'done' },
+          ],
+        },
+      },
+    });
+    await service.publishWorkflow(workflowAuth, { tenantId, projectId, workflowId: workflow.id });
+
+    const started = await service.startRun(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      idempotencyKey: 'workflow-run:fan-in-1',
+      request: {},
+    });
+    const runId = started?.run.id ?? '';
+
+    expect(jobRepository.jobs.map((job) => job.metadata.workflowStepId)).toEqual(['start']);
+
+    await service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId,
+      stepId: 'start',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+    });
+
+    expect(jobRepository.jobs.map((job) => job.metadata.workflowStepId)).toEqual(['start', 'branch-a', 'branch-b']);
+
+    await service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId,
+      stepId: 'branch-a',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d11',
+    });
+
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'join', state: 'pending', jobId: null }),
+      expect.objectContaining({ stepId: 'done', state: 'pending', jobId: null }),
+    ]));
+
+    await service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId,
+      stepId: 'branch-b',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d12',
+    });
+    await service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId,
+      stepId: 'branch-b',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d12',
+    });
+
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'join', state: 'completed', jobId: null }),
+      expect.objectContaining({ stepId: 'done', state: 'running', jobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d13' }),
+    ]));
+    expect(jobRepository.jobs.map((job) => job.idempotencyKey)).toEqual([
+      `workflow-step:${runId}:start`,
+      `workflow-step:${runId}:branch-a`,
+      `workflow-step:${runId}:branch-b`,
+      `workflow-step:${runId}:done`,
+    ]);
+  });
+
   it('publishes a valid static fan-out fan-in workflow DAG', async () => {
     const { app } = createWorkflowsApp();
     const graph = {
