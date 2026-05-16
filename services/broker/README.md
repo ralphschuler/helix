@@ -9,6 +9,7 @@ Current foundation:
 - Durable broker rows are owned by the control-plane migration `0006_job_attempt_lease_schema.sql` until service-backed repositories land.
 - Runtime retry policy uses `maxAttempts`: non-exhausted failures/expired leases return to `retrying`; exhausted failures/expired leases move the job to `dead_lettered` and keep attempt/lease rows inspectable.
 - `runBrokerServiceLoop` provides the lease-expiry worker loop. It calls the host `expireLeases` service with tenant/project scope, caps batch size, polls quickly after work, backs off when idle, backs off after errors, and stops through `AbortSignal`.
+- `createBrokerPolicyEngine` isolates claim ordering policy from claim transaction plumbing. Formal priority levels are `critical`, `high`, `normal`, `low`, and `background`; invalid levels are rejected at the policy boundary.
 
 Run/validation commands:
 
