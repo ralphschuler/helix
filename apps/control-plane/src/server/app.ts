@@ -40,7 +40,7 @@ import {
   type BrowserAuthContext,
   type BrowserAuthProvider,
 } from '../features/auth/browser-auth.js';
-import { AuthorizationError } from '../features/iam/authorization.js';
+import { AuthorizationError, assertProjectPermission } from '../features/iam/authorization.js';
 import {
   CustomRoleNotFoundError,
   CustomRolePrivilegeEscalationError,
@@ -987,6 +987,47 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     }
   });
 
+  app.get('/api/v1/jobs/stream', async (context) => {
+    if (runtimeEventStore === undefined) {
+      return context.json({ error: 'runtime_event_store_not_configured' }, 503);
+    }
+
+    const limit = parsePositiveIntegerQuery(context.req.query('limit') ?? null, 100, 500);
+    const workflowId = context.req.query('workflowId');
+    const parsedWorkflowId = workflowId === undefined ? undefined : uuidV7Schema.safeParse(workflowId);
+    const metadata = parseMetadataFilters(context.req.query());
+
+    if (limit === null || (parsedWorkflowId !== undefined && !parsedWorkflowId.success) || metadata === null) {
+      return context.json({ error: 'invalid_stream_filter' }, 400);
+    }
+
+    try {
+      const authContext = context.get('apiAuth');
+      assertProjectPermission(authContext, { tenantId: authContext.tenantId, projectId: authContext.projectId }, 'jobs:read');
+      const result = await runtimeEventStore.list({
+        tenantId: authContext.tenantId,
+        projectId: authContext.projectId,
+        workflowId: parsedWorkflowId?.data,
+        metadata,
+        after: context.req.query('cursor') ?? null,
+        limit,
+      });
+
+      return new Response(formatSseEvents(result.events), {
+        headers: {
+          'cache-control': 'no-cache',
+          'content-type': 'text/event-stream; charset=utf-8',
+        },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Invalid runtime event cursor.') {
+        return context.json({ error: 'invalid_cursor' }, 400);
+      }
+
+      return handleJobApiError(context, error);
+    }
+  });
+
   app.post('/api/v1/jobs', async (context) => {
     if (jobService === undefined) {
       return context.json({ error: 'job_service_not_configured' }, 503);
@@ -1706,6 +1747,26 @@ function getStringArrayField(body: Record<string, unknown>, field: string): read
   }
 
   return value as string[];
+}
+
+function parseMetadataFilters(query: Record<string, string>): Readonly<Record<string, string>> | null {
+  const filters: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(query)) {
+    if (!key.startsWith('metadata.')) {
+      continue;
+    }
+
+    const metadataKey = key.slice('metadata.'.length);
+
+    if (metadataKey.trim().length === 0 || value.trim().length === 0) {
+      return null;
+    }
+
+    filters[metadataKey] = value;
+  }
+
+  return filters;
 }
 
 function parsePositiveIntegerQuery(value: string | null, defaultValue: number, maxValue: number): number | null {

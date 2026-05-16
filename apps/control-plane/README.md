@@ -17,6 +17,7 @@ SaaS API, control-plane application, and v1 `/admin` UI shell.
 - Runtime consumer inbox helpers for event-id dedupe, retryable failed processing, and tenant/project-scoped consumption records.
 - Runtime event store projection boundary for tenant/project-scoped event views, opaque cursors, and retention metadata without making projections authoritative state.
 - Workflow event stream endpoint `GET /api/v1/workflows/:workflowId/stream` emits retained events as SSE and resumes from opaque cursors.
+- Job event stream endpoint `GET /api/v1/jobs/stream` multiplexes retained job events with workflow and metadata filters plus cursor resume.
 - Project API key-authenticated job API for creating/listing/statusing tenant/project-scoped jobs with idempotent creation and runtime outbox events.
 - Retry/DLQ job behavior: exhausted failed attempts or expired leases transition jobs to `dead_lettered`, while attempt and lease history remains inspectable.
 - Agent token-authenticated processor registration API for outbound processor capability updates with scoped audit events.
@@ -36,6 +37,7 @@ yarn workspace @helix/control-plane test -- outbox
 yarn workspace @helix/control-plane test -- inbox
 yarn workspace @helix/control-plane test -- event-store
 yarn workspace @helix/control-plane test -- workflow-stream
+yarn workspace @helix/control-plane test -- job-stream
 yarn workspace @helix/control-plane test -- workflow-checkpoints
 yarn workspace @helix/control-plane check
 yarn workspace @helix/control-plane lint

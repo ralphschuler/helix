@@ -25,7 +25,8 @@ export interface RuntimeEventStoreRow {
 export interface RuntimeEventStoreListInput {
   readonly tenantId: string;
   readonly projectId: string;
-  readonly workflowId?: string;
+  readonly workflowId?: string | undefined;
+  readonly metadata?: Readonly<Record<string, string>> | undefined;
   readonly after?: string | null;
   readonly limit: number;
 }
@@ -136,7 +137,8 @@ export class InMemoryRuntimeEventStoreProjection implements RuntimeEventStorePro
           row.tenantId === input.tenantId &&
           row.projectId === input.projectId &&
           row.sequence > afterSequence &&
-          (input.workflowId === undefined || row.payload.workflowId === input.workflowId),
+          matchesWorkflow(row, input.workflowId) &&
+          matchesMetadata(row, input.metadata),
       )
       .sort((left, right) => left.sequence - right.sequence)
       .slice(0, input.limit)
@@ -148,7 +150,8 @@ export class InMemoryRuntimeEventStoreProjection implements RuntimeEventStorePro
         row.tenantId === input.tenantId &&
         row.projectId === input.projectId &&
         row.sequence > last.sequence &&
-        (input.workflowId === undefined || row.payload.workflowId === input.workflowId),
+        matchesWorkflow(row, input.workflowId) &&
+        matchesMetadata(row, input.metadata),
     );
 
     return { events, nextCursor: hasMore ? last.cursor : null };
@@ -157,6 +160,25 @@ export class InMemoryRuntimeEventStoreProjection implements RuntimeEventStorePro
   private retainedUntil(occurredAt: Date): Date | null {
     return this.retainForDays === null ? null : new Date(occurredAt.getTime() + this.retainForDays * msPerDay);
   }
+}
+
+function matchesWorkflow(row: RuntimeEventStoreRow, workflowId: string | undefined): boolean {
+  return workflowId === undefined || row.payload.workflowId === workflowId;
+}
+
+function matchesMetadata(row: RuntimeEventStoreRow, metadata: Readonly<Record<string, string>> | undefined): boolean {
+  if (metadata === undefined) {
+    return true;
+  }
+
+  const value = row.payload.metadata;
+
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return Object.entries(metadata).every(([key, expected]) => record[key] === expected);
 }
 
 function cloneRow(row: RuntimeEventStoreRow): RuntimeEventStoreRow {
