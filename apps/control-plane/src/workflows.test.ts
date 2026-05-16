@@ -12,6 +12,7 @@ import {
   InMemoryWorkflowRepository,
   WorkflowService,
 } from './features/workflows/workflow-service.js';
+import { InMemoryJobRepository, JobService } from './features/jobs/job-service.js';
 import { createApp, type ApiAuthProvider } from './server/app.js';
 
 const tenantId = '01890f42-98c4-7cc3-8a5e-0c567f1d3a77';
@@ -158,6 +159,118 @@ describe('workflow API', () => {
       state: 'queued',
       idempotencyKey: 'workflow-run:invoice-1',
     });
+  });
+
+  it('persists workflow step state and enqueues each initially ready job step exactly once', async () => {
+    const workflowRepository = new InMemoryWorkflowRepository();
+    const jobRepository = new InMemoryJobRepository();
+    const jobService = new JobService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d11',
+      ]),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: jobRepository,
+    });
+    const service = new WorkflowService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d11',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d12',
+      ]),
+      jobActivator: async ({ idempotencyKey, request, scope }) => jobService.createJob(
+        { ...workflowAuth, permissions: [...workflowAuth.permissions, 'jobs:create'] },
+        { ...scope, idempotencyKey, request },
+      ),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: workflowRepository,
+    });
+    const workflow = await service.createWorkflow(workflowAuth, {
+      tenantId,
+      projectId,
+      request: {
+        slug: 'step-activation',
+        name: 'Step Activation',
+        draftGraph: {
+          nodes: [{ id: 'extract', type: 'job' }, { id: 'transform', type: 'job' }],
+          edges: [{ from: 'extract', to: 'transform' }],
+        },
+      },
+    });
+    await service.publishWorkflow(workflowAuth, { tenantId, projectId, workflowId: workflow.id });
+
+    const first = await service.startRun(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      idempotencyKey: 'workflow-run:steps-1',
+      request: {},
+    });
+    const second = await service.startRun(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      idempotencyKey: 'workflow-run:steps-1',
+      request: {},
+    });
+
+    expect(first?.created).toBe(true);
+    expect(second?.created).toBe(false);
+    expect(workflowRepository.steps).toEqual([
+      expect.objectContaining({
+        runId: first?.run.id,
+        stepId: 'extract',
+        type: 'job',
+        state: 'running',
+        jobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+      }),
+      expect.objectContaining({ runId: first?.run.id, stepId: 'transform', type: 'job', state: 'pending', jobId: null }),
+    ]);
+    expect(jobRepository.jobs).toHaveLength(1);
+    expect(jobRepository.jobs[0]).toMatchObject({
+      state: 'queued',
+      idempotencyKey: `workflow-step:${first?.run.id}:extract`,
+      metadata: {
+        workflowId: workflow.id,
+        workflowRunId: first?.run.id,
+        workflowStepId: 'extract',
+      },
+    });
+
+    await expect(service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId: first?.run.id ?? '',
+      stepId: 'extract',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d11',
+    })).rejects.toThrow(/not bound to the completed job/);
+
+    await service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId: first?.run.id ?? '',
+      stepId: 'extract',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+    });
+    await service.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId: first?.run.id ?? '',
+      stepId: 'extract',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+    });
+
+    expect(workflowRepository.steps).toEqual([
+      expect.objectContaining({ stepId: 'extract', state: 'completed', jobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10' }),
+      expect.objectContaining({ stepId: 'transform', state: 'running', jobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d11' }),
+    ]);
+    expect(jobRepository.jobs.map((job) => job.idempotencyKey)).toEqual([
+      `workflow-step:${first?.run.id}:extract`,
+      `workflow-step:${first?.run.id}:transform`,
+    ]);
   });
 
   it('publishes a valid static fan-out fan-in workflow DAG', async () => {

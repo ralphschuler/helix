@@ -49,6 +49,27 @@ export const workflowRunRecordSchema = tenantProjectScopeSchema
   })
   .strict();
 
+export const workflowStepStateValues = ['pending', 'running', 'completed', 'failed', 'canceled'] as const;
+export const workflowStepTypeValues = ['job', 'wait_signal', 'approval', 'timer', 'pause', 'join', 'completion'] as const;
+export const workflowStepStateSchema = z.enum(workflowStepStateValues);
+export const workflowStepTypeSchema = z.enum(workflowStepTypeValues);
+
+export const workflowStepRecordSchema = tenantProjectScopeSchema
+  .extend({
+    id: uuidV7Schema,
+    workflowId: uuidV7Schema,
+    workflowVersionId: uuidV7Schema,
+    runId: uuidV7Schema,
+    stepId: nonBlankTextSchema.max(256),
+    type: workflowStepTypeSchema,
+    state: workflowStepStateSchema,
+    jobId: uuidV7Schema.nullable(),
+    metadata: metadataSchema,
+    createdAt: isoTimestampSchema,
+    updatedAt: isoTimestampSchema,
+  })
+  .strict();
+
 export const createWorkflowRequestSchema = z
   .object({
     slug: nonBlankTextSchema.max(128),
@@ -121,6 +142,9 @@ export const workflowRunStartedEventPayloadSchema = tenantProjectScopeSchema
 export type WorkflowDefinitionRecord = z.infer<typeof workflowDefinitionRecordSchema>;
 export type WorkflowVersionRecord = z.infer<typeof workflowVersionRecordSchema>;
 export type WorkflowRunRecord = z.infer<typeof workflowRunRecordSchema>;
+export type WorkflowStepState = z.infer<typeof workflowStepStateSchema>;
+export type WorkflowStepType = z.infer<typeof workflowStepTypeSchema>;
+export type WorkflowStepRecord = z.infer<typeof workflowStepRecordSchema>;
 export type CreateWorkflowRequest = z.infer<typeof createWorkflowRequestSchema>;
 export type UpdateWorkflowDraftRequest = z.infer<typeof updateWorkflowDraftRequestSchema>;
 export type PublishWorkflowRequest = z.infer<typeof publishWorkflowRequestSchema>;

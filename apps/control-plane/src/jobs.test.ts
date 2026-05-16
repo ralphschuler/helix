@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AuthContext } from '@helix/contracts';
+import type { AuthContext, JobRecord } from '@helix/contracts';
 import {
   claimJobResponseSchema,
   completeJobAttemptResponseSchema,
@@ -86,6 +86,7 @@ function createJobsApp(
   options: {
     readonly ids?: readonly string[];
     readonly now?: () => Date;
+    readonly onJobCompleted?: ((job: JobRecord) => Promise<void>) | undefined;
     readonly processorRepository?: InMemoryProcessorRegistryRepository | undefined;
   } = {},
 ) {
@@ -105,6 +106,7 @@ function createJobsApp(
       ],
     ),
     now: options.now ?? (() => new Date('2026-05-15T13:00:00.000Z')),
+    onJobCompleted: options.onJobCompleted,
     repository,
     processorRepository: options.processorRepository,
   });
@@ -601,6 +603,7 @@ describe('job API', () => {
       throw new Error('Expected a claimed job.');
     }
 
+    const completedJobs: JobRecord[] = [];
     const completeApp = createJobsApp(agentAuth, repository, {
       ids: [
         '01890f42-98c4-7cc3-aa5e-0c567f1d3d53',
@@ -609,6 +612,9 @@ describe('job API', () => {
         '01890f42-98c4-7cc3-aa5e-0c567f1d3d56',
       ],
       now: () => new Date('2026-05-15T13:04:00.000Z'),
+      onJobCompleted: async (job) => {
+        completedJobs.push(job);
+      },
     }).app;
     const completionPath = `/api/v1/jobs/${claimBody.claim.job.id}/attempts/${claimBody.claim.attempt.id}/leases/${claimBody.claim.lease.id}/complete`;
     const completionRequest = {
@@ -641,6 +647,10 @@ describe('job API', () => {
         lease: { id: claimBody.claim.lease.id, state: 'released' },
       },
     });
+    expect(completedJobs).toEqual([
+      expect.objectContaining({ id: claimBody.claim.job.id, state: 'completed' }),
+      expect.objectContaining({ id: claimBody.claim.job.id, state: 'completed' }),
+    ]);
     expect(repository.runtimeEvents.map((event) => event.eventType)).toEqual([
       'job.created',
       'job.ready',

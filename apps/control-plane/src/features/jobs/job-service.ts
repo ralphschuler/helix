@@ -186,6 +186,7 @@ export interface JobServiceOptions {
   readonly repository: JobRepository;
   readonly processorRepository?: ProcessorRegistryRepository | undefined;
   readonly routingPolicy?: RoutingPolicy;
+  readonly onJobCompleted?: ((job: JobRecord) => Promise<void>) | undefined;
   readonly now?: () => Date;
   readonly generateId?: () => string;
 }
@@ -208,6 +209,7 @@ export class JobService {
   private readonly repository: JobRepository;
   private readonly processorRepository: ProcessorRegistryRepository | undefined;
   private readonly routingPolicy: RoutingPolicy;
+  private readonly onJobCompleted: ((job: JobRecord) => Promise<void>) | undefined;
   private readonly now: () => Date;
   private readonly generateId: () => string;
 
@@ -215,6 +217,7 @@ export class JobService {
     this.repository = options.repository;
     this.processorRepository = options.processorRepository;
     this.routingPolicy = options.routingPolicy ?? new CapabilityRoutingPolicy();
+    this.onJobCompleted = options.onJobCompleted;
     this.now = options.now ?? (() => new Date());
     this.generateId = options.generateId ?? (() => randomUuidV7LikeId(this.now()));
   }
@@ -405,6 +408,10 @@ export class JobService {
 
     if (result.status === 'stale') {
       throw new StaleJobAttemptError();
+    }
+
+    if (result.status === 'applied' || result.status === 'duplicate') {
+      await this.onJobCompleted?.(result.transition.job);
     }
 
     return {

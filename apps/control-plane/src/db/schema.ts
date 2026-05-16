@@ -1,5 +1,5 @@
 import type { ColumnType } from 'kysely';
-import type { AttemptState, BillingStatus, JobState, LeaseState, WorkflowRunRecord } from '@helix/contracts';
+import type { AttemptState, BillingStatus, JobState, LeaseState, WorkflowRunRecord, WorkflowStepRecord } from '@helix/contracts';
 
 export type TimestampColumn = ColumnType<Date, Date | string | undefined, Date | string>;
 export type NullableTimestampColumn = ColumnType<
@@ -242,6 +242,16 @@ export type WorkflowRunStateColumn = ColumnType<
   WorkflowRunRecord['state'] | undefined,
   WorkflowRunRecord['state']
 >;
+export type WorkflowStepStateColumn = ColumnType<
+  WorkflowStepRecord['state'],
+  WorkflowStepRecord['state'] | undefined,
+  WorkflowStepRecord['state']
+>;
+export type WorkflowStepTypeColumn = ColumnType<
+  WorkflowStepRecord['type'],
+  WorkflowStepRecord['type'] | undefined,
+  WorkflowStepRecord['type']
+>;
 
 export interface WorkflowDefinitionsTable {
   id: string;
@@ -278,6 +288,33 @@ export interface WorkflowRunsTable {
   idempotency_key: string;
   created_at: TimestampColumn;
   updated_at: TimestampColumn;
+}
+
+export interface WorkflowStepsTable {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  workflow_id: string;
+  workflow_version_id: string;
+  run_id: string;
+  step_id: string;
+  type: WorkflowStepTypeColumn;
+  state: WorkflowStepStateColumn;
+  job_id: NullableTextColumn;
+  metadata_json: JsonColumn;
+  created_at: TimestampColumn;
+  updated_at: TimestampColumn;
+}
+
+export interface WorkflowStepDependenciesTable {
+  tenant_id: string;
+  project_id: string;
+  workflow_id: string;
+  workflow_version_id: string;
+  run_id: string;
+  from_step_id: string;
+  to_step_id: string;
+  created_at: TimestampColumn;
 }
 
 export interface JobsTable {
@@ -363,6 +400,8 @@ export interface HelixDatabase {
   workflow_definitions: WorkflowDefinitionsTable;
   workflow_versions: WorkflowVersionsTable;
   workflow_runs: WorkflowRunsTable;
+  workflow_steps: WorkflowStepsTable;
+  workflow_step_dependencies: WorkflowStepDependenciesTable;
   jobs: JobsTable;
   job_attempts: JobAttemptsTable;
   job_leases: JobLeasesTable;
