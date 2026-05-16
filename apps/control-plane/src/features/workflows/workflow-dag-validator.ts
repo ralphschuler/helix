@@ -11,6 +11,7 @@ const supportedStepTypes = new Set([
 interface WorkflowGraphNode {
   readonly id: string;
   readonly type?: string;
+  readonly wakeAt?: unknown;
 }
 
 interface WorkflowGraphEdge {
@@ -49,6 +50,12 @@ export function assertValidWorkflowDag(graph: Record<string, unknown>): void {
 
     if (node.type !== undefined && !supportedStepTypes.has(node.type)) {
       details.push(`unsupported step type '${node.type}' on node '${node.id}'`);
+    }
+
+    if (node.type === 'timer') {
+      if (typeof node.wakeAt !== 'string' || Number.isNaN(Date.parse(node.wakeAt))) {
+        details.push(`timer step '${node.id}' must have an ISO wakeAt timestamp`);
+      }
     }
   }
 
@@ -110,7 +117,7 @@ function readNodes(value: unknown, details: string[]): WorkflowGraphNode[] {
 
     return record.type === undefined
       ? [{ id: record.id }]
-      : [{ id: record.id, type: record.type }];
+      : [{ id: record.id, type: record.type, wakeAt: record.wakeAt }];
   });
 }
 

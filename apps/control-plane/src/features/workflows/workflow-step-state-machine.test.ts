@@ -6,13 +6,16 @@ describe('workflow step state machine', () => {
   it('rejects invalid workflow step transitions', () => {
     expect(() => transitionWorkflowStepState('pending', 'completed')).toThrow(/Invalid workflow step transition/);
     expect(() => transitionWorkflowStepState('waiting_for_signal', 'running')).toThrow(/Invalid workflow step transition/);
+    expect(() => transitionWorkflowStepState('waiting_for_timer', 'running')).toThrow(/Invalid workflow step transition/);
     expect(() => transitionWorkflowStepState('completed', 'running')).toThrow(/Invalid workflow step transition/);
   });
 
   it('allows ready, terminal, and idempotent terminal workflow step transitions', () => {
     expect(transitionWorkflowStepState('pending', 'running')).toBe('running');
     expect(transitionWorkflowStepState('pending', 'waiting_for_signal')).toBe('waiting_for_signal');
+    expect(transitionWorkflowStepState('pending', 'waiting_for_timer')).toBe('waiting_for_timer');
     expect(transitionWorkflowStepState('waiting_for_signal', 'completed')).toBe('completed');
+    expect(transitionWorkflowStepState('waiting_for_timer', 'completed')).toBe('completed');
     expect(transitionWorkflowStepState('waiting_for_signal', 'waiting_for_signal')).toBe('waiting_for_signal');
     expect(transitionWorkflowStepState('running', 'completed')).toBe('completed');
     expect(transitionWorkflowStepState('completed', 'completed')).toBe('completed');
