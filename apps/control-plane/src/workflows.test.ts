@@ -784,6 +784,125 @@ describe('workflow API', () => {
     ]);
   });
 
+  it('preserves signal and approval waits across service restart with idempotent external actions', async () => {
+    const workflowRepository = new InMemoryWorkflowRepository();
+    const jobRepository = new InMemoryJobRepository();
+    const jobService = new JobService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d11',
+        '01890f42-98c4-7cc3-bb5e-0c567f1d3d12',
+      ]),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: jobRepository,
+    });
+    const createWorkflowService = () => new WorkflowService({
+      generateId: createIdGenerator([
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d10',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d11',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d12',
+        '01890f42-98c4-7cc3-aa5e-0c567f1d3d13',
+      ]),
+      jobActivator: async ({ idempotencyKey, request, scope }) => jobService.createJob(
+        { ...workflowAuth, permissions: [...workflowAuth.permissions, 'jobs:create'] },
+        { ...scope, idempotencyKey, request },
+      ),
+      now: () => new Date('2026-05-15T13:00:00.000Z'),
+      repository: workflowRepository,
+    });
+    const firstRuntime = createWorkflowService();
+    const workflow = await firstRuntime.createWorkflow(workflowAuth, {
+      tenantId,
+      projectId,
+      request: {
+        slug: 'restart-waits',
+        name: 'Restart Waits',
+        draftGraph: {
+          nodes: [
+            { id: 'collect', type: 'job' },
+            { id: 'customer-signal', type: 'wait_signal' },
+            { id: 'manager-approval', type: 'approval' },
+            { id: 'ship', type: 'job' },
+          ],
+          edges: [
+            { from: 'collect', to: 'customer-signal' },
+            { from: 'customer-signal', to: 'manager-approval' },
+            { from: 'manager-approval', to: 'ship' },
+          ],
+        },
+      },
+    });
+    await firstRuntime.publishWorkflow(workflowAuth, { tenantId, projectId, workflowId: workflow.id });
+    const started = await firstRuntime.startRun(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      idempotencyKey: 'workflow-run:restart-waits-1',
+      request: {},
+    });
+    const runId = started?.run.id ?? '';
+
+    await firstRuntime.completeStep(workflowAuth, {
+      tenantId,
+      projectId,
+      workflowId: workflow.id,
+      runId,
+      stepId: 'collect',
+      completedJobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d10',
+    });
+
+    const restartedRuntime = createWorkflowService();
+    const restartedApp = createApp({ apiAuthProvider: createFixedApiAuthProvider(workflowAuth), workflowService: restartedRuntime });
+    const signalResponse = await restartedApp.request(`/api/v1/signals/${workflow.id}`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ runId, stepId: 'customer-signal', payload: { received: true } }),
+    });
+    const duplicateSignalResponse = await restartedApp.request(`/api/v1/signals/${workflow.id}`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ runId, stepId: 'customer-signal', payload: { received: true } }),
+    });
+    const wrongTenantApp = createApp({
+      apiAuthProvider: createFixedApiAuthProvider({
+        ...workflowAuth,
+        tenantId: '01890f42-98c4-7cc3-8a5e-0c567f1d3a79',
+        projectId: '01890f42-98c4-7cc3-9a5e-0c567f1d3a80',
+      }),
+      workflowService: restartedRuntime,
+    });
+    const wrongTenantApprovalResponse = await wrongTenantApp.request(`/api/v1/workflows/${workflow.id}/runs/${runId}/approvals/manager-approval`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ decision: 'approved' }),
+    });
+    const approvalResponse = await restartedApp.request(`/api/v1/workflows/${workflow.id}/runs/${runId}/approvals/manager-approval`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ decision: 'approved', payload: { restarted: true } }),
+    });
+    const duplicateApprovalResponse = await restartedApp.request(`/api/v1/workflows/${workflow.id}/runs/${runId}/approvals/manager-approval`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ decision: 'approved', payload: { restarted: true } }),
+    });
+
+    expect(signalResponse.status).toBe(202);
+    expect(duplicateSignalResponse.status).toBe(200);
+    expect(wrongTenantApprovalResponse.status).toBe(404);
+    expect(approvalResponse.status).toBe(202);
+    expect(duplicateApprovalResponse.status).toBe(200);
+    expect(workflowRepository.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'customer-signal', state: 'completed' }),
+      expect.objectContaining({ stepId: 'manager-approval', state: 'completed' }),
+      expect.objectContaining({ stepId: 'ship', state: 'running', jobId: '01890f42-98c4-7cc3-bb5e-0c567f1d3d11' }),
+    ]));
+    expect(jobRepository.jobs.map((job) => job.idempotencyKey)).toEqual([
+      `workflow-step:${runId}:collect`,
+      `workflow-step:${runId}:ship`,
+    ]);
+  });
+
   it('persists timer wake-up timestamps and resumes due timers after restart exactly once', async () => {
     const workflowRepository = new InMemoryWorkflowRepository();
     const jobRepository = new InMemoryJobRepository();
