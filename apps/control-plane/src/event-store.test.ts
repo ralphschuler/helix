@@ -60,6 +60,20 @@ describe('runtime event store projection', () => {
     });
   });
 
+  it('applies retention settings to replay availability and expired cursor resume', async () => {
+    const projection = new InMemoryRuntimeEventStoreProjection({
+      now: () => new Date('2026-05-17T13:00:00.000Z'),
+      retainForDays: 1,
+    });
+
+    const expired = await projection.project(event(1, '2026-05-15T13:00:00.000Z'));
+    await projection.project(event(2, '2026-05-17T12:00:00.000Z'));
+
+    const freshPage = await projection.list({ ...scope, limit: 10 });
+    expect(freshPage.events.map((row) => row.sequence)).toEqual([2]);
+    await expect(projection.list({ ...scope, after: expired.cursor, limit: 10 })).rejects.toThrow('Runtime event cursor expired.');
+  });
+
   it('rejects malformed opaque cursors at the boundary', () => {
     const cursor = encodeRuntimeEventCursor({ sequence: 12 });
 

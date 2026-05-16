@@ -33,7 +33,7 @@ import {
   StripeWebhookSignatureError,
 } from '../features/billing/stripe-adapter.js';
 import type { BillingWebhookHandler } from '../features/billing/stripe-webhook.js';
-import type { RuntimeEventStoreProjection, RuntimeEventStoreRow } from '../features/runtime/event-store.js';
+import { RuntimeEventCursorExpiredError, type RuntimeEventStoreProjection, type RuntimeEventStoreRow } from '../features/runtime/event-store.js';
 import {
   createDefaultBrowserAuthProvider,
   hasValidCsrfToken,
@@ -470,6 +470,10 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     } catch (error) {
       if (error instanceof Error && error.message === 'Invalid runtime event cursor.') {
         return context.json({ error: 'invalid_cursor' }, 400);
+      }
+
+      if (error instanceof RuntimeEventCursorExpiredError) {
+        return context.json({ error: 'retention_expired' }, 410);
       }
 
       return handleWorkflowApiError(context, error);
@@ -1022,6 +1026,10 @@ export function createApp(options: CreateAppOptions = {}): Hono<AppEnvironment> 
     } catch (error) {
       if (error instanceof Error && error.message === 'Invalid runtime event cursor.') {
         return context.json({ error: 'invalid_cursor' }, 400);
+      }
+
+      if (error instanceof RuntimeEventCursorExpiredError) {
+        return context.json({ error: 'retention_expired' }, 410);
       }
 
       return handleJobApiError(context, error);
