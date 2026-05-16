@@ -8,6 +8,7 @@ import type {
   StartWorkflowRunRequest,
   TenantProjectScope,
   UpdateWorkflowDraftRequest,
+  WorkflowCheckpointRecord,
   WorkflowDefinitionRecord,
   WorkflowRunRecord,
   WorkflowStepRecord,
@@ -42,6 +43,10 @@ export interface WorkflowRepositoryUpdateDraftInput extends TenantProjectScope {
 
 export interface WorkflowRepositoryPublishInput {
   readonly version: WorkflowVersionRecord;
+}
+
+export interface WorkflowRepositoryCreateCheckpointInput {
+  readonly checkpoint: WorkflowCheckpointRecord;
 }
 
 export interface WorkflowStepDependencyRecord extends TenantProjectScope {
@@ -91,6 +96,8 @@ export interface WorkflowRepository {
     readonly updatedAt: string;
   }): Promise<WorkflowStepRecord | null>;
   createRun(input: WorkflowRepositoryStartRunInput): Promise<WorkflowRunRecord>;
+  createCheckpoint(input: WorkflowRepositoryCreateCheckpointInput): Promise<WorkflowCheckpointRecord>;
+  listCheckpoints(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowCheckpointRecord[]>;
   listWaitingTimerSteps(input: TenantProjectScope): Promise<WorkflowStepRecord[]>;
 }
 
@@ -971,6 +978,7 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
   readonly stepDependencies: WorkflowStepDependencyRecord[] = [];
   readonly runtimeEvents: RuntimeEventRecord[] = [];
   readonly runtimeOutbox: RuntimeOutboxRecord[] = [];
+  readonly checkpoints: WorkflowCheckpointRecord[] = [];
 
   async createWorkflow(input: WorkflowRepositoryCreateInput): Promise<WorkflowDefinitionRecord> {
     this.workflows.push(cloneWorkflow(input.workflow));
@@ -1193,6 +1201,23 @@ export class InMemoryWorkflowRepository implements WorkflowRepository {
     this.runtimeEvents.push(...input.events.map(cloneRuntimeEvent));
     this.runtimeOutbox.push(...input.outbox.map(cloneRuntimeOutbox));
     return cloneRun(input.run);
+  }
+
+  async createCheckpoint(input: WorkflowRepositoryCreateCheckpointInput): Promise<WorkflowCheckpointRecord> {
+    this.checkpoints.push(cloneCheckpoint(input.checkpoint));
+    return cloneCheckpoint(input.checkpoint);
+  }
+
+  async listCheckpoints(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowCheckpointRecord[]> {
+    return this.checkpoints
+      .filter(
+        (checkpoint) =>
+          checkpoint.tenantId === input.tenantId &&
+          checkpoint.projectId === input.projectId &&
+          checkpoint.runId === input.runId,
+      )
+      .sort((left, right) => left.sequence - right.sequence)
+      .map(cloneCheckpoint);
   }
 }
 
@@ -1444,6 +1469,29 @@ export class KyselyWorkflowRepository implements WorkflowRepository {
       return toWorkflowRunRecord(row);
     });
   }
+
+  async createCheckpoint(input: WorkflowRepositoryCreateCheckpointInput): Promise<WorkflowCheckpointRecord> {
+    const row = await this.db
+      .insertInto('workflow_checkpoints')
+      .values(toWorkflowCheckpointRow(input.checkpoint))
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    return toWorkflowCheckpointRecord(row);
+  }
+
+  async listCheckpoints(input: TenantProjectScope & { readonly runId: string }): Promise<WorkflowCheckpointRecord[]> {
+    const rows = await this.db
+      .selectFrom('workflow_checkpoints')
+      .selectAll()
+      .where('tenant_id', '=', input.tenantId)
+      .where('project_id', '=', input.projectId)
+      .where('run_id', '=', input.runId)
+      .orderBy('sequence', 'asc')
+      .execute();
+
+    return rows.map(toWorkflowCheckpointRecord);
+  }
 }
 
 function parseWorkflowGraph(graph: Record<string, unknown>): ParsedWorkflowGraph {
@@ -1525,6 +1573,10 @@ function cloneRun(run: WorkflowRunRecord): WorkflowRunRecord {
 
 function cloneStep(step: WorkflowStepRecord): WorkflowStepRecord {
   return { ...step, metadata: cloneJsonObject(step.metadata) };
+}
+
+function cloneCheckpoint(checkpoint: WorkflowCheckpointRecord): WorkflowCheckpointRecord {
+  return { ...checkpoint, metadata: cloneJsonObject(checkpoint.metadata) };
 }
 
 function cloneStepDependency(dependency: WorkflowStepDependencyRecord): WorkflowStepDependencyRecord {
@@ -1619,6 +1671,24 @@ function toWorkflowStepDependencyRecord(
   };
 }
 
+function toWorkflowCheckpointRecord(row: Selectable<HelixDatabase['workflow_checkpoints']>): WorkflowCheckpointRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    workflowId: row.workflow_id,
+    workflowVersionId: row.workflow_version_id,
+    runId: row.run_id,
+    stepId: row.step_id,
+    sequence: row.sequence,
+    payloadRef: row.payload_ref,
+    stateDigest: row.state_digest,
+    metadata: row.metadata_json,
+    retainedUntil: row.retained_until === null ? null : toIsoString(row.retained_until),
+    createdAt: toIsoString(row.created_at),
+  };
+}
+
 function toWorkflowDefinitionRow(workflow: WorkflowDefinitionRecord) {
   return {
     id: workflow.id,
@@ -1690,6 +1760,24 @@ function toWorkflowStepDependencyRow(dependency: WorkflowStepDependencyRecord) {
     from_step_id: dependency.fromStepId,
     to_step_id: dependency.toStepId,
     created_at: dependency.createdAt,
+  };
+}
+
+function toWorkflowCheckpointRow(checkpoint: WorkflowCheckpointRecord) {
+  return {
+    id: checkpoint.id,
+    tenant_id: checkpoint.tenantId,
+    project_id: checkpoint.projectId,
+    workflow_id: checkpoint.workflowId,
+    workflow_version_id: checkpoint.workflowVersionId,
+    run_id: checkpoint.runId,
+    step_id: checkpoint.stepId,
+    sequence: checkpoint.sequence,
+    payload_ref: checkpoint.payloadRef,
+    state_digest: checkpoint.stateDigest,
+    metadata_json: checkpoint.metadata,
+    retained_until: checkpoint.retainedUntil,
+    created_at: checkpoint.createdAt,
   };
 }
 

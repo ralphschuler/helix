@@ -70,6 +70,22 @@ export const workflowStepRecordSchema = tenantProjectScopeSchema
   })
   .strict();
 
+export const workflowCheckpointRecordSchema = tenantProjectScopeSchema
+  .extend({
+    id: uuidV7Schema,
+    workflowId: uuidV7Schema,
+    workflowVersionId: uuidV7Schema,
+    runId: uuidV7Schema,
+    stepId: nonBlankTextSchema.max(256),
+    sequence: z.number().int().positive(),
+    payloadRef: nonBlankTextSchema.max(2048),
+    stateDigest: nonBlankTextSchema.max(256),
+    metadata: metadataSchema,
+    retainedUntil: isoTimestampSchema.nullable(),
+    createdAt: isoTimestampSchema,
+  })
+  .strict();
+
 export const createWorkflowRequestSchema = z
   .object({
     slug: nonBlankTextSchema.max(128),
@@ -177,6 +193,7 @@ export type WorkflowRunRecord = z.infer<typeof workflowRunRecordSchema>;
 export type WorkflowStepState = z.infer<typeof workflowStepStateSchema>;
 export type WorkflowStepType = z.infer<typeof workflowStepTypeSchema>;
 export type WorkflowStepRecord = z.infer<typeof workflowStepRecordSchema>;
+export type WorkflowCheckpointRecord = z.infer<typeof workflowCheckpointRecordSchema>;
 export type CreateWorkflowRequest = z.infer<typeof createWorkflowRequestSchema>;
 export type UpdateWorkflowDraftRequest = z.infer<typeof updateWorkflowDraftRequestSchema>;
 export type PublishWorkflowRequest = z.infer<typeof publishWorkflowRequestSchema>;
