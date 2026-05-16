@@ -1,5 +1,7 @@
 import { queryOptions } from '@tanstack/react-query';
 
+import { listControlPaneSections } from '../features/control-pane/registry.js';
+
 export interface CustomerWorkspaceFeature {
   readonly id: string;
   readonly label: string;
@@ -16,64 +18,15 @@ export interface CustomerWorkspaceOverview {
   readonly features: readonly CustomerWorkspaceFeature[];
 }
 
-export const customerWorkspaceFeatures: readonly CustomerWorkspaceFeature[] = [
-  {
-    id: 'jobs',
-    label: 'Jobs',
-    path: '/jobs',
-    summary: 'Create, inspect, and track tenant/project-scoped jobs.',
-    status: 'ready',
-  },
-  {
-    id: 'workflows',
-    label: 'Workflows',
-    path: '/workflows',
-    summary: 'Inspect workflow definitions, runs, checkpoints, and stream links.',
-    status: 'ready',
-  },
-  {
-    id: 'processors',
-    label: 'Processors',
-    path: '/processors',
-    summary: 'Monitor processor health, capabilities, routing, and regions.',
-    status: 'ready',
-  },
-  {
-    id: 'schedules',
-    label: 'Schedules',
-    path: '/schedules',
-    summary: 'Manage delayed, cron, and interval automation for this project.',
-    status: 'ready',
-  },
-  {
-    id: 'streams',
-    label: 'Streams',
-    path: '/streams',
-    summary: 'Observe workflow and job event streams with cursor resume behavior.',
-    status: 'ready',
-  },
-  {
-    id: 'api-keys',
-    label: 'API Keys',
-    path: '/api-keys',
-    summary: 'Project API key management is planned behind permissioned controls.',
-    status: 'planned',
-  },
-  {
-    id: 'billing',
-    label: 'Billing',
-    path: '/billing',
-    summary: 'Billing posture is visible while payment mutations stay gated.',
-    status: 'planned',
-  },
-  {
-    id: 'settings',
-    label: 'Project Settings',
-    path: '/settings',
-    summary: 'Project and retention settings are planned with audit-backed controls.',
-    status: 'planned',
-  },
-];
+export const customerWorkspaceFeatures: readonly CustomerWorkspaceFeature[] = listControlPaneSections('customer')
+  .filter((section) => section.id !== 'customer-overview')
+  .map((section) => ({
+    id: section.id,
+    label: section.label,
+    path: section.path,
+    summary: section.summary,
+    status: section.readiness === 'ready' ? 'ready' : 'planned',
+  }));
 
 export const customerWorkspaceOverviewQueryOptions = queryOptions({
   queryKey: ['customer', 'workspace', 'overview'] as const,
