@@ -7,6 +7,7 @@ import type {
 } from '@helix/contracts';
 
 import { assertProjectPermission } from '../iam/authorization.js';
+import type { SecurityAuditSink } from '../iam/security-audit.js';
 import { randomUuidV7LikeId } from '../iam/token-secrets.js';
 
 export interface CreateScheduleInput extends TenantProjectScope {
@@ -42,17 +43,20 @@ export interface ScheduleRepository {
 
 export interface ScheduleServiceOptions {
   readonly repository: ScheduleRepository;
+  readonly auditSink?: SecurityAuditSink;
   readonly now?: () => Date;
   readonly generateId?: () => string;
 }
 
 export class ScheduleService {
   private readonly repository: ScheduleRepository;
+  private readonly auditSink: SecurityAuditSink;
   private readonly now: () => Date;
   private readonly generateId: () => string;
 
   constructor(options: ScheduleServiceOptions) {
     this.repository = options.repository;
+    this.auditSink = options.auditSink ?? new NoopSecurityAuditSink();
     this.now = options.now ?? (() => new Date());
     this.generateId = options.generateId ?? (() => randomUuidV7LikeId(this.now()));
   }
@@ -77,7 +81,9 @@ export class ScheduleService {
       updatedAt: timestamp,
     };
 
-    return this.repository.createSchedule({ schedule });
+    const created = await this.repository.createSchedule({ schedule });
+    await this.recordAudit(authContext, created, 'schedule.created');
+    return created;
   }
 
   async getSchedule(authContext: AuthContext, input: GetScheduleInput): Promise<ScheduleRecord | null> {
@@ -95,19 +101,49 @@ export class ScheduleService {
   async updateSchedule(authContext: AuthContext, input: UpdateScheduleInput): Promise<ScheduleRecord | null> {
     assertProjectPermission(authContext, input, 'schedules:update');
 
-    return this.repository.updateSchedule({
+    const updated = await this.repository.updateSchedule({
       tenantId: input.tenantId,
       projectId: input.projectId,
       scheduleId: input.scheduleId,
       patch: input.request,
       updatedAt: this.now().toISOString(),
     });
+
+    if (updated !== null) {
+      await this.recordAudit(authContext, updated, classifyScheduleUpdateAction(input.request));
+    }
+
+    return updated;
   }
 
   async deleteSchedule(authContext: AuthContext, input: DeleteScheduleInput): Promise<boolean> {
     assertProjectPermission(authContext, input, 'schedules:delete');
 
-    return this.repository.deleteSchedule(input);
+    const existing = await this.repository.findSchedule(input);
+    const deleted = await this.repository.deleteSchedule(input);
+
+    if (deleted && existing !== null) {
+      await this.recordAudit(authContext, existing, 'schedule.deleted');
+    }
+
+    return deleted;
+  }
+
+  private async recordAudit(authContext: AuthContext, schedule: ScheduleRecord, action: string): Promise<void> {
+    await this.auditSink.record({
+      id: this.generateId(),
+      tenantId: schedule.tenantId,
+      projectId: schedule.projectId,
+      actor: authContext.principal,
+      action,
+      resourceType: 'schedule',
+      resourceId: schedule.id,
+      metadata: {
+        retentionPolicyId: getRetentionPolicyId(schedule),
+        scheduleName: schedule.name,
+      },
+      occurredAt: this.now(),
+    });
   }
 }
 
@@ -172,6 +208,23 @@ export class InMemoryScheduleRepository implements ScheduleRepository {
   }
 }
 
+function classifyScheduleUpdateAction(request: UpdateScheduleRequest): string {
+  if (request.state === 'disabled') {
+    return 'schedule.disabled';
+  }
+
+  if (request.state === 'enabled') {
+    return 'schedule.enabled';
+  }
+
+  return 'schedule.updated';
+}
+
+function getRetentionPolicyId(schedule: ScheduleRecord): string | null {
+  const retentionPolicyId = schedule.metadata.retentionPolicyId;
+  return typeof retentionPolicyId === 'string' ? retentionPolicyId : null;
+}
+
 function matchesScope(schedule: TenantProjectScope, scope: TenantProjectScope): boolean {
   return schedule.tenantId === scope.tenantId && schedule.projectId === scope.projectId;
 }
@@ -182,4 +235,10 @@ function cloneSchedule(schedule: ScheduleRecord): ScheduleRecord {
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+class NoopSecurityAuditSink implements SecurityAuditSink {
+  async record(): Promise<void> {
+    return;
+  }
 }
