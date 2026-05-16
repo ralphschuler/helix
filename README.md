@@ -9,6 +9,7 @@ See [PRD.md](./PRD.md) for product requirements and phased delivery.
 - [Architecture Decision Records](./docs/adr/README.md)
 - [Domain glossary](./docs/glossary.md)
 - [Architecture checklist](./docs/architecture-checklist.md)
+- [Event policy](./docs/event-policy.md)
 
 ## Workspace
 

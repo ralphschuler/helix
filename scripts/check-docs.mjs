@@ -94,6 +94,18 @@ const requiredChecklistSnippets = [
   'side effects',
 ];
 
+const requiredEventPolicySnippets = [
+  'Postgres is authoritative',
+  'Kafka/Redpanda is derived',
+  'orderingKey',
+  'partitionKey',
+  'tenant/project',
+  'per-partition ordering',
+  'no global ordering guarantee',
+  'Event `version`',
+  'Generated artifacts are not produced yet',
+];
+
 function read(path) {
   return readFileSync(path, 'utf8');
 }
@@ -131,10 +143,12 @@ requireFile('PRD.md');
 requireFile('docs/adr/README.md');
 requireFile('docs/glossary.md');
 requireFile('docs/architecture-checklist.md');
+requireFile('docs/event-policy.md');
 
 requireIncludes('README.md', './docs/adr/README.md', 'ADR index link');
 requireIncludes('README.md', './docs/glossary.md', 'glossary link');
 requireIncludes('README.md', './docs/architecture-checklist.md', 'architecture checklist link');
+requireIncludes('README.md', './docs/event-policy.md', 'event policy link');
 
 for (const adr of requiredAdrs) {
   requireAllIncludes(adr.path, [adr.title, ...requiredAdrSections]);
@@ -146,6 +160,12 @@ for (const term of requiredGlossaryTerms) {
 }
 
 requireAllIncludes('docs/architecture-checklist.md', requiredChecklistSnippets);
+requireAllIncludes('docs/event-policy.md', requiredEventPolicySnippets);
+requireIncludes(
+  'docs/adr/0006-event-consistency-and-derived-streams.md',
+  '../event-policy.md',
+  'event policy link',
+);
 
 if (failures.length > 0) {
   console.error('docs:check failed');

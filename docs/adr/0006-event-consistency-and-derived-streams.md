@@ -15,6 +15,7 @@ Helix needs high-throughput fanout, integrations, observability, and resumable s
 - Publishers drain the transactional outbox to Kafka/Redpanda with safe retry.
 - Consumers record inbox/dedupe rows keyed by stable event id before applying platform-side effects.
 - Event contracts are versioned Zod schemas under `packages/contracts` and include tenant/project scope where applicable.
+- Event ordering, partition keys, and generated artifact expectations follow the [event policy](../event-policy.md).
 - Public API/state contracts must distinguish authoritative state from emitted events and projections.
 - Delivery is at least once. Helix guarantees idempotent broker/control-plane state transitions, not exactly-once external side effects.
 - Redpanda is the local/CI Kafka-compatible target; external schema registry is deferred until event-bus hardening.
@@ -39,6 +40,7 @@ Helix needs high-throughput fanout, integrations, observability, and resumable s
 - Future tests simulate Kafka unavailable during state transition and verify outbox drains later.
 - Duplicate Kafka delivery tests verify one platform-side effect.
 - Contract review verifies event schemas include ids, versions, timestamps, tenant/project scope, and ordering/partition notes where relevant.
+- `yarn docs:check` verifies the event policy remains linked and states ordering, partitioning, versioning, artifact, and derived-stream constraints.
 
 ## Stop/rollback point
 

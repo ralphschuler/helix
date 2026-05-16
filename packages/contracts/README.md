@@ -12,7 +12,7 @@ Base contracts live under `src/base/` and are re-exported from `src/index.ts`:
 - Tenant and tenant/project scope objects.
 - Tenant/project auth context for user, API key, agent token, and service principals.
 - Framework-neutral error envelopes.
-- Versioned event envelopes with ID, type, timestamp, tenant/project scope, and payload.
+- Versioned event envelopes with ID, type, timestamp, ordering key, partition key, tenant/project scope, and payload.
 - Opaque stream cursors.
 - Tenant/project-scoped idempotency keys.
 
@@ -21,12 +21,13 @@ Base contracts live under `src/base/` and are re-exported from `src/index.ts`:
 - Additive fields should be optional until all producers and consumers are migrated.
 - Removing or renaming fields is a breaking contract change and needs an issue/ADR-backed migration path.
 - Event `version` identifies the event contract revision, not Kafka ordering or retry count.
+- Event `orderingKey` identifies the logical ordered domain stream; `partitionKey` identifies the event bus partition key. Helix relies on per-partition ordering only and provides no global ordering guarantee.
 - Cursors are opaque client tokens. Do not document or depend on their internal encoding.
 - Idempotency keys are always interpreted inside tenant/project scope.
 
 ## Schema artifacts
 
-Generated artifacts are not produced yet because no public API routes exist in this package. When API/event schemas stabilize, add a generator that writes reviewable artifacts to:
+Generated artifacts are not produced yet because no public API routes exist in this package. When API/event schemas stabilize, add a generator that writes reviewable artifacts preserving event envelope version, scope, `orderingKey`, and `partitionKey` to:
 
 - `packages/contracts/artifacts/json-schema/`
 - `packages/contracts/artifacts/openapi/`
